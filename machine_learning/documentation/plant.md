@@ -6,6 +6,7 @@ Saya ingin membuat project machine learning dengan judul:
 
 Dataset:
 https://www.kaggle.com/datasets/mohamedbakhet/amazon-books-reviews/data
+note : sudah saya download pda folder dataset
 
 Tujuan project:
 

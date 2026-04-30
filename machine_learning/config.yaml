@@ -1,0 +1,36 @@
+project:
+  name: amazon_books_sentiment_recommender
+  random_state: 42
+
+paths:
+  reviews_csv: dataset/Books_rating.csv
+  books_csv: dataset/books_data.csv
+  processed_reviews_csv: data/processed/processed_reviews.csv
+  train_csv: data/processed/train.csv
+  validation_csv: data/processed/validation.csv
+  test_csv: data/processed/test.csv
+  model_registry: models/model_registry.json
+  eda_dir: reports/eda
+  sentiment_dir: models/sentiment/baseline
+  recommender_dir: models/recommender
+  recommender_report_json: reports/recommender_metrics.json
+
+data:
+  sample_rows: 120000
+  min_review_text_length: 5
+
+preprocessing:
+  test_size: 0.15
+  validation_size: 0.15
+
+sentiment:
+  tfidf_max_features: 30000
+  tfidf_min_df: 2
+  ngram_range: [1, 2]
+
+recommender:
+  min_user_interactions: 3
+  min_item_interactions: 3
+  latent_factors: 20
+  top_k_values: [5, 10]
+  candidate_pool_size: 1000

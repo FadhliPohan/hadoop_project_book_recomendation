@@ -16,6 +16,7 @@ Tujuan project:
 4. Menggunakan Python sebagai bahasa utama.
 5. Project harus cocok untuk kebutuhan akademik, portofolio, dan bisa dikembangkan ke production-level.
 6. lokasi pengkodingan pada folder machine_learning
+7. setiap progress akan dibuatkan secara detail di report_progeress.md dimana yang sudah selesai dan belum selesai. sehingga apbila saya kehabisan token akan langsung bisa dilanjutkan kembali
 
 Buatkan saya project secara lengkap dengan tahapan berikut:
 

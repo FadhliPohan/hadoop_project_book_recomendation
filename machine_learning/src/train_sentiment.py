@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import logging
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 from sklearn.svm import LinearSVC
 
+from .mlflow_tracker import log_artifact, log_metrics, log_params, start_run
 from .utils import append_model_registry, ensure_dir, resolve_path
 
 LABEL_ORDER = [0, 1, 2]
@@ -87,68 +89,99 @@ def train_baseline_sentiment(config: Dict) -> Dict:
     best_val_f1 = -1.0
 
     for model_name, estimator in models.items():
-        logging.info("Training baseline model: %s", model_name)
-        pipeline = Pipeline(
-            steps=[
-                (
-                    "tfidf",
-                    TfidfVectorizer(
-                        max_features=tfidf_max_features,
-                        min_df=tfidf_min_df,
-                        ngram_range=ngram_range,
+        run_ctx = start_run(config, model_name) or nullcontext()
+        with run_ctx:
+            logging.info("Training baseline model: %s", model_name)
+            pipeline = Pipeline(
+                steps=[
+                    (
+                        "tfidf",
+                        TfidfVectorizer(
+                            max_features=tfidf_max_features,
+                            min_df=tfidf_min_df,
+                            ngram_range=ngram_range,
+                        ),
                     ),
-                ),
-                ("classifier", estimator),
-            ]
-        )
+                    ("classifier", estimator),
+                ]
+            )
 
-        pipeline.fit(x_train, y_train)
+            pipeline.fit(x_train, y_train)
 
-        val_pred = pipeline.predict(x_val)
-        test_pred = pipeline.predict(x_test)
+            val_pred = pipeline.predict(x_val)
+            test_pred = pipeline.predict(x_test)
 
-        val_metrics = _metrics(y_val.to_numpy(), val_pred)
-        test_metrics = _metrics(y_test.to_numpy(), test_pred)
+            val_metrics = _metrics(y_val.to_numpy(), val_pred)
+            test_metrics = _metrics(y_test.to_numpy(), test_pred)
 
-        model_path = out_dir / f"{model_name}.pkl"
-        joblib.dump(pipeline, model_path)
+            model_path = out_dir / f"{model_name}.pkl"
+            joblib.dump(pipeline, model_path)
 
-        _plot_confusion(y_test.to_numpy(), test_pred, out_dir / f"{model_name}_confusion_matrix_test.png")
-        _plot_confusion(y_val.to_numpy(), val_pred, out_dir / f"{model_name}_confusion_matrix_validation.png")
+            cm_test_path = out_dir / f"{model_name}_confusion_matrix_test.png"
+            cm_val_path = out_dir / f"{model_name}_confusion_matrix_validation.png"
+            _plot_confusion(y_test.to_numpy(), test_pred, cm_test_path)
+            _plot_confusion(y_val.to_numpy(), val_pred, cm_val_path)
 
-        report_txt_path = out_dir / f"{model_name}_classification_report.txt"
-        report_txt_path.write_text(
-            classification_report(y_test.to_numpy(), test_pred, digits=4),
-            encoding="utf-8",
-        )
+            report_txt_path = out_dir / f"{model_name}_classification_report.txt"
+            report_txt_path.write_text(
+                classification_report(y_test.to_numpy(), test_pred, digits=4),
+                encoding="utf-8",
+            )
 
-        all_metrics[model_name] = {
-            "validation": val_metrics,
-            "test": test_metrics,
-            "model_path": str(model_path),
-        }
+            all_metrics[model_name] = {
+                "validation": val_metrics,
+                "test": test_metrics,
+                "model_path": str(model_path),
+            }
 
-        if val_metrics["f1_weighted"] > best_val_f1:
-            best_val_f1 = val_metrics["f1_weighted"]
-            best_model_name = model_name
+            if val_metrics["f1_weighted"] > best_val_f1:
+                best_val_f1 = val_metrics["f1_weighted"]
+                best_model_name = model_name
 
-        append_model_registry(
-            config,
-            {
-                "name": model_name,
-                "task": "sentiment_baseline",
-                "trained_at_utc": datetime.now(timezone.utc).isoformat(),
-                "dataset": str(resolve_path(config, "processed_reviews_csv")),
-                "metrics": test_metrics,
-                "version": "v1",
-                "path": str(model_path),
-                "hyperparameters": {
+            append_model_registry(
+                config,
+                {
+                    "name": model_name,
+                    "task": "sentiment_baseline",
+                    "trained_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "dataset": str(resolve_path(config, "processed_reviews_csv")),
+                    "metrics": test_metrics,
+                    "version": "v1",
+                    "path": str(model_path),
+                    "hyperparameters": {
+                        "tfidf_max_features": tfidf_max_features,
+                        "tfidf_min_df": tfidf_min_df,
+                        "ngram_range": ngram_range,
+                    },
+                },
+            )
+
+            log_params(
+                config,
+                {
+                    "model_name": model_name,
                     "tfidf_max_features": tfidf_max_features,
                     "tfidf_min_df": tfidf_min_df,
                     "ngram_range": ngram_range,
                 },
-            },
-        )
+            )
+            log_metrics(
+                config,
+                {
+                    "val_accuracy": val_metrics["accuracy"],
+                    "val_precision_weighted": val_metrics["precision_weighted"],
+                    "val_recall_weighted": val_metrics["recall_weighted"],
+                    "val_f1_weighted": val_metrics["f1_weighted"],
+                    "test_accuracy": test_metrics["accuracy"],
+                    "test_precision_weighted": test_metrics["precision_weighted"],
+                    "test_recall_weighted": test_metrics["recall_weighted"],
+                    "test_f1_weighted": test_metrics["f1_weighted"],
+                },
+            )
+            log_artifact(config, model_path, artifact_path=f"sentiment_baseline/{model_name}")
+            log_artifact(config, cm_test_path, artifact_path=f"sentiment_baseline/{model_name}")
+            log_artifact(config, cm_val_path, artifact_path=f"sentiment_baseline/{model_name}")
+            log_artifact(config, report_txt_path, artifact_path=f"sentiment_baseline/{model_name}")
 
     summary = {
         "best_model": best_model_name,

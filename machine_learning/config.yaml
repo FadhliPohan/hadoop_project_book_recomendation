@@ -12,6 +12,7 @@ paths:
   model_registry: models/model_registry.json
   eda_dir: reports/eda
   sentiment_dir: models/sentiment/baseline
+  sentiment_transformer_dir: models/sentiment/transformer/distilbert_v1
   recommender_dir: models/recommender
   recommender_report_json: reports/recommender_metrics.json
 
@@ -28,9 +29,22 @@ sentiment:
   tfidf_min_df: 2
   ngram_range: [1, 2]
 
+transformer:
+  model_name: distilbert-base-uncased
+  max_length: 128
+  batch_size: 16
+  learning_rate: 2.0e-5
+  epochs: 3
+  early_stopping_patience: 2
+  weight_decay: 0.01
+
 recommender:
   min_user_interactions: 3
   min_item_interactions: 3
   latent_factors: 20
   top_k_values: [5, 10]
   candidate_pool_size: 1000
+
+mlflow:
+  enabled: true
+  experiment_name: amazon_books_sentiment_recommender

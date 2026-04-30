@@ -2,7 +2,15 @@ pandas
 numpy
 scikit-learn
 matplotlib
+seaborn
 nltk
+spacy
+transformers
+torch
+datasets
+evaluate
+mlflow
 scipy
 joblib
+tqdm
 pyyaml

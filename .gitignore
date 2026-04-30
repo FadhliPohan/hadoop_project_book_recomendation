@@ -1,1 +1,16 @@
 machine_learning/dataset/*.csv
+.venv/
+__pycache__/
+*.pyc
+
+# Generated ML artifacts (do not push)
+machine_learning/data/processed/*
+!machine_learning/data/processed/.gitkeep
+machine_learning/models/*
+!machine_learning/models/.gitkeep
+machine_learning/reports/*
+!machine_learning/reports/.gitkeep
+machine_learning/logs/*
+!machine_learning/logs/.gitkeep
+machine_learning/mlruns/*
+!machine_learning/mlruns/.gitkeep

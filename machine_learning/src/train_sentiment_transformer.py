@@ -161,15 +161,25 @@ def train_transformer_sentiment(config: Dict) -> Dict:
         seed=int(config["project"]["random_state"]),
     )
 
-    trainer = Trainer(
+    # Compatibility: transformers >=4.40 uses processing_class= instead of tokenizer=
+    _trainer_kwargs = dict(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        tokenizer=tokenizer,
         compute_metrics=compute_metrics,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=early_stop_patience)],
     )
+    try:
+        import inspect
+        if "processing_class" in inspect.signature(Trainer.__init__).parameters:
+            _trainer_kwargs["processing_class"] = tokenizer
+        else:
+            _trainer_kwargs["tokenizer"] = tokenizer
+    except Exception:
+        _trainer_kwargs["tokenizer"] = tokenizer
+
+    trainer = Trainer(**_trainer_kwargs)
 
     run_name = "distilbert_sentiment_v1"
     run_ctx = start_run(config, run_name) or nullcontext()

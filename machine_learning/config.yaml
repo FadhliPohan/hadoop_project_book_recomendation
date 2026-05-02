@@ -48,3 +48,19 @@ recommender:
 mlflow:
   enabled: true
   experiment_name: amazon_books_sentiment_recommender
+
+hadoop:
+  namenode_uri: hdfs://fadhli:9000
+  dataset_hdfs_path: /data/amazon_books
+  output_hdfs_path: /output/amazon_books_ml
+  hdfs_ui_port: 9870
+  yarn_ui_port: 8088
+
+spark:
+  master: yarn
+  deploy_mode: client
+  num_executors: 2
+  executor_cores: 2
+  executor_memory: 2G
+  driver_memory: 2G
+  py_files: []

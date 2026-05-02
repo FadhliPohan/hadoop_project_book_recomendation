@@ -159,9 +159,11 @@ def _normalize_rating(score: float, rating_min: float, rating_max: float) -> flo
 
 
 def _build_content_model(train_df: pd.DataFrame, out_dir: Path) -> Tuple[TfidfVectorizer, csr_matrix, Dict[str, int]]:
+    # pandas >=2.0 compatible: reset_index() + explicit rename
     grouped = (
-        train_df.groupby("item_id", as_index=False)["review_text_processed"]
+        train_df.groupby("item_id")["review_text_processed"]
         .apply(lambda s: " ".join(s.astype(str).head(5)))
+        .reset_index()
         .rename(columns={"review_text_processed": "item_text"})
     )
 

@@ -47,7 +47,7 @@ def clean_text(text: str) -> str:
     return text
 
 
-def remove_stopwords(text: str, stop_words: set[str]) -> str:
+def remove_stopwords(text: str, stop_words: Set[str]) -> str:
     tokens = text.split()
     return " ".join(token for token in tokens if token not in stop_words)
 

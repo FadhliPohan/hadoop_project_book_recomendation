@@ -277,11 +277,14 @@ Gunakan tab ini untuk mengelola Hadoop cluster dan upload dataset ke HDFS.
 |---|---|
 | **Start Cluster** | Menjalankan `start-dfs.sh` dan `start-yarn.sh` |
 | **Stop Cluster** | Menghentikan `stop-yarn.sh` dan `stop-dfs.sh` |
+| **Fix Permission Worker1 & Worker2** | Membuat path HDFS user dan membuka permission agar upload tidak gagal |
 | **Upload ke HDFS** | Mengupload dataset ke path HDFS yang ditentukan |
 
 **Cara upload dataset ke HDFS:**
-1. Isi field **HDFS target** dengan path tujuan (default: `/data/amazon_books`)
+1. Isi field **HDFS target** dengan path tujuan (default: `/user/<username>/amazon_books`)
 2. Klik tombol **Upload ke HDFS**
+
+Jika muncul error `Permission denied ... inode="/"`, klik tombol **Fix Permission Worker1 & Worker2** terlebih dahulu.
 
 > **Prasyarat:** Hadoop harus sudah terinstal dan cluster harus dalam keadaan aktif sebelum upload.
 

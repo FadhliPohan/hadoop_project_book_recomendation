@@ -51,8 +51,8 @@ mlflow:
 
 hadoop:
   namenode_uri: hdfs://fadhli:9000
-  dataset_hdfs_path: /data/amazon_books
-  output_hdfs_path: /output/amazon_books_ml
+  dataset_hdfs_path: /user/fadhli/amazon_books
+  output_hdfs_path: /user/fadhli/output/amazon_books_ml
   hdfs_ui_port: 9870
   yarn_ui_port: 8088
 

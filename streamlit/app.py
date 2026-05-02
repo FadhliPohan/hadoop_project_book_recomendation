@@ -4,6 +4,7 @@ Tabs: Overview | EDA | Pipeline | Reports | Inference | Cluster
 """
 from __future__ import annotations
 
+import getpass
 import json
 import subprocess
 import sys
@@ -25,6 +26,14 @@ def _python_bin() -> str:
     return str(p) if p.exists() else "python3"
 
 
+def _default_hdfs_dataset_path() -> str:
+    return f"/user/{getpass.getuser()}/amazon_books"
+
+
+def _default_hdfs_output_path() -> str:
+    return f"/user/{getpass.getuser()}/output/amazon_books_ml"
+
+
 def _load_config() -> Dict:
     try:
         from src.utils import load_config
@@ -39,9 +48,17 @@ def _load_cluster_cfg() -> Dict:
     p = ROOT_DIR / "config" / "cluster.yaml"
     if p.exists():
         return yaml.safe_load(p.read_text()) or {}
+    default_dataset = _default_hdfs_dataset_path()
+    default_output = _default_hdfs_output_path()
     return {
         "cluster": {"master": "fadhli", "workers": ["fadhli@worker1", "fadhli@worker2"], "ssh_timeout": 5},
-        "hdfs":    {"namenode": "hdfs://fadhli:9000", "dataset_path": "/data/amazon_books", "ui_host": "fadhli", "ui_port": 9870},
+        "hdfs":    {
+            "namenode": "hdfs://fadhli:9000",
+            "dataset_path": default_dataset,
+            "output_path": default_output,
+            "ui_host": "fadhli",
+            "ui_port": 9870,
+        },
         "yarn":    {"ui_host": "fadhli", "ui_port": 8088},
         "spark":   {"master": "yarn", "deploy_mode": "client", "num_executors": 2,
                     "executor_cores": 2, "executor_memory": "2G", "driver_memory": "2G"},
@@ -432,9 +449,21 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
                 res = _run(["bash", str(ROOT_DIR / "scripts" / "stop_cluster.sh")])
             _show_result(res)
 
+    # ---- Permission Fix ----
+    st.subheader("🔐 Perbaiki Permission HDFS")
+    st.caption("Mode ini bersifat permisif (world-writable) untuk mempermudah lab/testing cluster.")
+    permission_target_user = st.text_input("Target user HDFS", value=getpass.getuser(), key="perm_target_user")
+    if st.button("Fix Permission Worker1 & Worker2", use_container_width=True):
+        with st.spinner("Memperbaiki permission HDFS..."):
+            res = _run(
+                ["bash", str(ROOT_DIR / "scripts" / "fix_hdfs_permissions.sh"), permission_target_user],
+                timeout=600,
+            )
+        _show_result(res)
+
     # ---- HDFS Upload ----
     st.subheader("📤 Upload Dataset ke HDFS")
-    hdfs_target = st.text_input("HDFS Target Path", value=hdfs_cfg.get("dataset_path", "/data/amazon_books"))
+    hdfs_target = st.text_input("HDFS Target Path", value=hdfs_cfg.get("dataset_path", _default_hdfs_dataset_path()))
     if st.button("Upload ke HDFS", use_container_width=True):
         with st.spinner("Mengupload..."):
             res = _run(["bash", str(ROOT_DIR / "scripts" / "upload_to_hdfs.sh"), hdfs_target])
@@ -466,7 +495,8 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
 
     # ---- HDFS file browser ----
     st.subheader("🗂️ Browse HDFS")
-    hdfs_path = st.text_input("HDFS Path", value="/data/amazon_books")
+    default_hdfs_path = hdfs_cfg.get("dataset_path", _default_hdfs_dataset_path())
+    hdfs_path = st.text_input("HDFS Path", value=default_hdfs_path)
     if st.button("List HDFS"):
         res = _run(["hdfs", "dfs", "-ls", "-h", hdfs_path])
         _show_result(res)

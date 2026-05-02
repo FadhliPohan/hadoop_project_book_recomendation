@@ -8,8 +8,8 @@ cluster:
 
 hdfs:
   namenode: hdfs://fadhli:9000
-  dataset_path: /data/amazon_books
-  output_path: /output/amazon_books_ml
+  dataset_path: /user/fadhli/amazon_books
+  output_path: /user/fadhli/output/amazon_books_ml
   ui_host: fadhli
   ui_port: 9870
 

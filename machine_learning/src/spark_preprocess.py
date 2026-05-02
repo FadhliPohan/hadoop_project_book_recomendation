@@ -14,21 +14,53 @@ Atau langsung:
 """
 from __future__ import annotations
 
-import re
+import os
 import sys
 from pathlib import Path
 
-# Config defaults (bisa di-override via env var)
-HDFS_INPUT = "hdfs://fadhli:9000/data/amazon_books/Books_rating.csv"
-HDFS_OUTPUT = "hdfs://fadhli:9000/output/amazon_books_ml/processed"
+import yaml
+
+DEFAULT_NAMENODE_URI = "hdfs://fadhli:9000"
+DEFAULT_DATASET_HDFS_PATH = "/user/fadhli/amazon_books"
+DEFAULT_OUTPUT_HDFS_PATH = "/user/fadhli/output/amazon_books_ml"
 SAMPLE_FRACTION = 1.0  # 1.0 = pakai semua data, 0.1 = 10% untuk test cepat
+
+
+def _build_hdfs_uri(namenode_uri: str, hdfs_path: str) -> str:
+    normalized_namenode = (namenode_uri or DEFAULT_NAMENODE_URI).rstrip("/")
+    normalized_path = hdfs_path if hdfs_path.startswith("/") else f"/{hdfs_path}"
+    return f"{normalized_namenode}{normalized_path}"
+
+
+def _resolve_hdfs_io_paths() -> tuple[str, str]:
+    env_input = os.environ.get("HDFS_INPUT_URI")
+    env_output = os.environ.get("HDFS_OUTPUT_URI")
+    if env_input and env_output:
+        return env_input, env_output
+
+    cfg_path = Path(__file__).resolve().parents[1] / "config.yaml"
+    if not cfg_path.exists():
+        default_input = _build_hdfs_uri(DEFAULT_NAMENODE_URI, f"{DEFAULT_DATASET_HDFS_PATH}/Books_rating.csv")
+        default_output = _build_hdfs_uri(DEFAULT_NAMENODE_URI, f"{DEFAULT_OUTPUT_HDFS_PATH}/processed")
+        return default_input, default_output
+
+    with cfg_path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    hadoop_cfg = cfg.get("hadoop", {})
+    namenode_uri = hadoop_cfg.get("namenode_uri", DEFAULT_NAMENODE_URI)
+    dataset_hdfs_path = hadoop_cfg.get("dataset_hdfs_path", DEFAULT_DATASET_HDFS_PATH)
+    output_hdfs_path = hadoop_cfg.get("output_hdfs_path", DEFAULT_OUTPUT_HDFS_PATH)
+
+    hdfs_input = env_input or _build_hdfs_uri(namenode_uri, f"{dataset_hdfs_path.rstrip('/')}/Books_rating.csv")
+    hdfs_output = env_output or _build_hdfs_uri(namenode_uri, f"{output_hdfs_path.rstrip('/')}/processed")
+    return hdfs_input, hdfs_output
 
 
 def main() -> None:
     try:
         from pyspark.sql import SparkSession
         from pyspark.sql import functions as F
-        from pyspark.sql.types import IntegerType, StringType
     except ImportError:
         print("[ERROR] PySpark belum terpasang. Install: pip install pyspark", file=sys.stderr)
         sys.exit(1)
@@ -42,9 +74,11 @@ def main() -> None:
     )
     spark.sparkContext.setLogLevel("WARN")
 
-    print(f"[INFO] Membaca dataset dari HDFS: {HDFS_INPUT}")
+    hdfs_input, hdfs_output = _resolve_hdfs_io_paths()
+
+    print(f"[INFO] Membaca dataset dari HDFS: {hdfs_input}")
     df = spark.read.csv(
-        HDFS_INPUT,
+        hdfs_input,
         header=True,
         inferSchema=True,
         multiLine=True,
@@ -114,8 +148,8 @@ def main() -> None:
     df.groupBy("sentiment_text").count().orderBy("count", ascending=False).show()
 
     # Simpan ke HDFS sebagai Parquet (efisien untuk dataset besar)
-    print(f"[INFO] Menyimpan hasil ke HDFS: {HDFS_OUTPUT}")
-    df.write.mode("overwrite").parquet(HDFS_OUTPUT)
+    print(f"[INFO] Menyimpan hasil ke HDFS: {hdfs_output}")
+    df.write.mode("overwrite").parquet(hdfs_output)
     print("[INFO] Selesai. Data tersimpan di HDFS.")
 
     spark.stop()

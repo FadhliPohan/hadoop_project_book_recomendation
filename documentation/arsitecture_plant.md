@@ -200,12 +200,12 @@ http://fadhli:8501
 
 ```text
 Local Master
-/home/hadoop/dataset/Books_rating.csv
+/home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews/machine_learning/dataset/Books_rating.csv
         |
         | hdfs dfs -put
         v
 HDFS
-/data/amazon_books/Books_rating.csv
+/user/fadhli/amazon_books/Books_rating.csv
         |
         | spark.read.csv()
         v
@@ -214,9 +214,9 @@ Spark DataFrame
         | preprocessing / training
         v
 Output
-/model/amazon_books_model
-/output/metrics.json
-/output/prediction_result
+/user/fadhli/output/amazon_books_ml/processed
+/home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews/output/metrics.json
+/home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews/machine_learning/models/
 ```
 
 ---
@@ -226,23 +226,25 @@ Output
 Struktur direktori yang disarankan di master:
 
 ```text
-/home/hadoop/ml-hadoop-project/
-├── dataset/
-│   └── Books_rating.csv
+/home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews/
+├── machine_learning/
+│   ├── config.yaml
+│   ├── dataset/
+│   │   └── Books_rating.csv
+│   └── src/
+│       └── spark_preprocess.py
 ├── scripts/
 │   ├── upload_to_hdfs.sh
 │   ├── start_cluster.sh
 │   ├── stop_cluster.sh
-│   └── submit_training.sh
-├── src/
-│   └── train.py
+│   ├── submit_training.sh
+│   └── spark_submit_training.sh
 ├── streamlit/
 │   └── app.py
 ├── output/
-│   ├── metrics.json
-│   └── model/
+│   └── metrics.json
 ├── config/
-│   └── paths.yaml
+│   └── cluster.yaml
 └── README.md
 ```
 
@@ -276,9 +278,9 @@ Install hanya di master:
 
 | Node | CPU | RAM | Disk |
 |---|---:|---:|---:|
-| fadhli | 4 core | 8–16 GB | 100 GB |
-| worker1 | 4 core | 8–16 GB | 100 GB |
-| worker2 | 4 core | 8–16 GB | 100 GB |
+| fadhli | 4 core | 8–16 GB | 40 GB+ |
+| worker1 | 4 core | 8–16 GB | 40 GB (usable ~38 GB) |
+| worker2 | 4 core | 8–16 GB | 40 GB (usable ~38 GB) |
 
 Catatan:
 
@@ -296,9 +298,9 @@ Semua node harus bisa saling berkomunikasi menggunakan hostname.
 Contoh konfigurasi `/etc/hosts`:
 
 ```text
-192.168.1.10 fadhli
-192.168.1.11 worker1
-192.168.1.12 worker2
+192.168.0.102 fadhli
+192.168.0.103 worker1
+192.168.0.105 worker2
 ```
 
 Port penting:
@@ -335,7 +337,7 @@ spark-submit \
   --executor-cores 2 \
   --executor-memory 2G \
   --driver-memory 2G \
-  /home/hadoop/ml-hadoop-project/src/train.py
+  /home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews/machine_learning/src/spark_preprocess.py
 ```
 
 ---
@@ -418,17 +420,32 @@ Tahapan konfigurasi:
 <configuration>
     <property>
         <name>dfs.namenode.name.dir</name>
-        <value>file:///home/hadoop/hadoopdata/hdfs/namenode</value>
+        <value>file:///data/hadoop/hdfs/namenode</value>
     </property>
 
     <property>
         <name>dfs.datanode.data.dir</name>
-        <value>file:///home/hadoop/hadoopdata/hdfs/datanode</value>
+        <value>file:///data/hadoop/hdfs/datanode</value>
     </property>
 
     <property>
         <name>dfs.replication</name>
         <value>2</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-bind-host</name>
+        <value>0.0.0.0</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.http-bind-host</name>
+        <value>0.0.0.0</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.datanode.registration.ip-hostname-check</name>
+        <value>false</value>
     </property>
 </configuration>
 ```
@@ -520,7 +537,7 @@ YARN UI : http://fadhli:8088
 ### 15.4 Cek Dataset
 
 ```bash
-hdfs dfs -ls -h /data/amazon_books
+hdfs dfs -ls -h /user/fadhli/amazon_books
 ```
 
 ### 15.5 Cek Spark Job

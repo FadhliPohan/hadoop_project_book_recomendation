@@ -1,0 +1,27 @@
+project:
+  root: "/home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews"
+
+local:
+  dataset_dir: machine_learning/dataset
+  books_rating_csv: machine_learning/dataset/Books_rating.csv
+  books_data_csv: machine_learning/dataset/books_data.csv
+  metrics_file: output/metrics.json
+
+hdfs:
+  namenode_uri: hdfs://fadhli:9000
+  dataset_dir: /user/fadhli/amazon_books
+  output_dir: /user/fadhli/output/amazon_books_ml
+
+cluster:
+  master_host: fadhli
+  workers:
+    - worker1
+    - worker2
+  worker_ips:
+    worker1: 192.168.0.103
+    worker2: 192.168.0.105
+
+ui:
+  hdfs_namenode: http://fadhli:9870
+  yarn_resourcemanager: http://fadhli:8088
+  streamlit: http://fadhli:8501

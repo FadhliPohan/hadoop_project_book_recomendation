@@ -7,7 +7,7 @@ CFG_FILE="$ROOT_DIR/config/cluster.yaml"
 
 TARGET_USER="${1:-${USER:-fadhli}}"
 TARGET_GROUP="${TARGET_GROUP:-supergroup}"
-HDFS_SUPERUSER="${HDFS_SUPERUSER:-root}"
+HDFS_SUPERUSER="${HDFS_SUPERUSER:-$TARGET_USER}"
 HDFS_BIN="${HDFS_BIN:-/usr/local/hadoop/bin/hdfs}"
 
 shift || true
@@ -77,7 +77,11 @@ if [[ ! -x "$HDFS_BIN" ]]; then
 fi
 
 run_hdfs() {
-  HADOOP_USER_NAME="$HDFS_SUPERUSER" "$HDFS_BIN" dfs "$@"
+  if [[ -n "${HDFS_SUPERUSER:-}" ]]; then
+    HADOOP_USER_NAME="$HDFS_SUPERUSER" "$HDFS_BIN" dfs "$@"
+  else
+    "$HDFS_BIN" dfs "$@"
+  fi
 }
 
 run_hdfs -mkdir -p /tmp /user

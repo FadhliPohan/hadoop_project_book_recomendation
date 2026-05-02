@@ -1,10 +1,13 @@
 cluster:
   master: fadhli
   workers:
-    - fadhli@worker1
-    - fadhli@worker2
+    - fadhli@worker1 # 192.168.0.103
+    - fadhli@worker2 # 192.168.0.105
   ssh_user: fadhli
   ssh_timeout: 5
+  worker_ips:
+    worker1: 192.168.0.103
+    worker2: 192.168.0.105
 
 hdfs:
   namenode: hdfs://fadhli:9000

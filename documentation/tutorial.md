@@ -538,9 +538,12 @@ Saat menjalankan `start_cluster.sh`, muncul error koneksi ke `worker1`/`worker2`
 1. Pastikan hostname `worker1` dan `worker2` terdaftar di `/etc/hosts`
 2. Pastikan SSH passwordless sudah dikonfigurasi:
    ```bash
-   ssh-copy-id hadoop@worker1
-   ssh-copy-id hadoop@worker2
+   ssh-copy-id fadhli@worker1
+   ssh-copy-id fadhli@worker2
    ```
+3. Pastikan mapping IP sesuai cluster aktif:
+   - `worker1` -> `192.168.0.103`
+   - `worker2` -> `192.168.0.105`
 
 ---
 

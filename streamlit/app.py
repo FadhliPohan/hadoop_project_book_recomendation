@@ -592,6 +592,7 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
     hdfs_cfg = ccfg.get("hdfs", {})
     yarn_cfg = ccfg.get("yarn", {})
     sp_cfg   = ccfg.get("spark", {})
+    spp_cfg  = cfg.get("spark_preprocess", {})
 
     # ---- Node Status ----
     st.subheader("🖥️ Status Node")
@@ -709,6 +710,42 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
         e_cores = col2.number_input("executor-cores",  value=int(sp_cfg.get("executor_cores", 2)),  min_value=1, max_value=8)
         e_mem   = col3.text_input("executor-memory", value=sp_cfg.get("executor_memory", "2G"))
         d_mem   = col4.text_input("driver-memory",   value=sp_cfg.get("driver_memory", "2G"))
+        col5, col6 = st.columns(2)
+        sample_fraction = col5.number_input(
+            "sample-fraction",
+            value=float(spp_cfg.get("sample_fraction", 1.0)),
+            min_value=0.01,
+            max_value=1.0,
+            step=0.05,
+            format="%.2f",
+        )
+        output_partitions = col6.number_input(
+            "output-partitions",
+            value=int(spp_cfg.get("output_partitions", 0)),
+            min_value=0,
+            max_value=1000,
+            step=1,
+        )
+        col7, col8 = st.columns(2)
+        log_row_counts = col7.checkbox(
+            "log row counts",
+            value=bool(spp_cfg.get("log_row_counts", False)),
+        )
+        show_label_distribution = col8.checkbox(
+            "show label distribution",
+            value=bool(spp_cfg.get("show_label_distribution", False)),
+        )
+        spark_timeout = st.number_input(
+            "submit-timeout (detik)",
+            value=int(sp_cfg.get("submit_timeout_sec", 1800)),
+            min_value=60,
+            max_value=14400,
+            step=60,
+        )
+        st.caption(
+            "Timeout ini hanya batas tunggu dashboard. Wrapper `spark_submit_training.sh` "
+            "sekarang menjalankan preflight YARN dan warning hostname sebelum submit."
+        )
 
     spark_step = st.selectbox("Step Spark", [
         "preprocess_spark — Distributed Preprocessing via YARN",
@@ -717,13 +754,19 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
 
     if st.button("🚀 Submit Spark Job", type="primary", use_container_width=True):
         cmd = [
+            "env",
+            f"YARN_PREFLIGHT_TIMEOUT={int(sp_cfg.get('preflight_timeout_sec', 20))}",
+            f"SPARK_SAMPLE_FRACTION={float(sample_fraction):.4f}",
+            f"SPARK_OUTPUT_PARTITIONS={int(output_partitions)}",
+            f"SPARK_LOG_ROW_COUNTS={'1' if log_row_counts else '0'}",
+            f"SPARK_SHOW_LABEL_DISTRIBUTION={'1' if show_label_distribution else '0'}",
             "bash", str(ROOT_DIR / "scripts" / "spark_submit_training.sh"),
             spark_step_key,
             str(int(n_exec)), str(int(e_cores)), e_mem, d_mem,
         ]
         res = _run_live(
             cmd,
-            timeout=600,
+            timeout=int(spark_timeout),
             title="Submitting Spark job ke YARN",
         )
         _show_result(res, show_command=False)

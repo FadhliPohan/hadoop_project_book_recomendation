@@ -64,3 +64,9 @@ spark:
   executor_memory: 2G
   driver_memory: 2G
   py_files: []
+
+spark_preprocess:
+  sample_fraction: 1.0
+  log_row_counts: false
+  show_label_distribution: false
+  output_partitions: 0

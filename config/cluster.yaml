@@ -27,3 +27,5 @@ spark:
   executor_cores: 2
   executor_memory: 2G
   driver_memory: 2G
+  submit_timeout_sec: 1800
+  preflight_timeout_sec: 20

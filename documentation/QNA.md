@@ -20,6 +20,21 @@ Namun ada batasan penting:
 - sebagian besar artifact training dan report masih **disimpan di master/local project**, bukan di HDFS
 - label sentiment dibuat otomatis dari rating, jadi ini bagus untuk bootstrapping dataset, tetapi bukan label manual yang benar-benar gold standard
 
+## Update Perbaikan 2026-05-04
+
+Sesudah analisa log YARN `ACCEPTED` yang menggantung, project ini diperbaiki pada beberapa titik operasional:
+
+- `scripts/spark_submit_training.sh` sekarang menjalankan **preflight YARN** sebelum submit, sehingga kasus ResourceManager tidak bisa dihubungi atau `NodeManager = 0` bisa gagal lebih cepat dengan pesan yang jelas.
+- `scripts/spark_submit_training.sh` dan `scripts/start_cluster.sh` sekarang memberi **warning jika hostname master resolve ke loopback** `127.x.x.x`, karena ini sering membuat worker atau ResourceManager salah alamat.
+- `machine_learning/src/spark_preprocess.py` dioptimalkan agar **tidak melakukan beberapa full scan mahal secara default**. `inferSchema` dimatikan, `count()` dan distribusi label dijadikan opsi, dan parameter sampling/output partition bisa diatur.
+- `streamlit/app.py` sekarang memberi kontrol `submit-timeout`, `sample-fraction`, `output-partitions`, `log row counts`, dan `show label distribution` untuk submit Spark dari dashboard.
+
+Artinya, walaupun konfigurasi cluster di luar repo tetap harus sehat, project ini sekarang jauh lebih baik dalam:
+
+- mendeteksi problem cluster lebih awal
+- mengurangi preprocessing Spark yang tidak perlu
+- memberi kontrol performa langsung dari dashboard
+
 ---
 
 ## 1. Apa fungsi keseluruhan aplikasi ini?
@@ -238,3 +253,224 @@ Jadi jika dilakukan training ulang sekarang, maka:
 - hanya output preprocessing Spark yang tersimpan di **HDFS**
 
 Jika tujuan akhirnya adalah memanfaatkan cluster untuk training penuh, maka project ini sudah menjadi fondasi yang bagus, tetapi masih perlu satu tahap integrasi lagi pada sisi training model.
+
+---
+
+## 11. Apa yang sebenarnya terjadi pada log `ACCEPTED` yang menggantung?
+
+Kasus log seperti ini:
+
+- `Application report ... (state: ACCEPTED)`
+- `cluster resource is empty`
+- `Queue Resource Limit for AM = <memory:0, vCores:0>`
+
+berarti **job Spark sudah diterima YARN scheduler, tetapi belum mendapat resource untuk menjalankan ApplicationMaster**.
+
+Dengan kata lain:
+
+- script Python belum masuk ke tahap preprocessing utama
+- executor belum benar-benar jalan di worker
+- training model belum dimulai
+
+Jadi masalah utamanya bukan ada di model training, tetapi ada di **resource cluster / YARN health**.
+
+### Penyebab paling mungkin
+
+- `NodeManager` worker belum terdaftar atau tidak aktif
+- `ResourceManager` sedang tidak sehat / tidak bisa dihubungi
+- hostname master resolve ke `127.x.x.x` sehingga service Hadoop salah konek
+- kapasitas scheduler queue terbaca `0`
+
+### Kenapa timeout 600 detik muncul?
+
+Pesan timeout itu berasal dari dashboard Streamlit, bukan dari Spark.
+
+Jadi urutannya seperti ini:
+
+1. UI menunggu proses `spark-submit`
+2. YARN terus menahan aplikasi di status `ACCEPTED`
+3. setelah 600 detik, wrapper dashboard memutus proses tunggu
+
+Karena itu di perbaikan terbaru timeout submit dibuat bisa diatur dari dashboard, dan submit script sekarang mengecek YARN lebih dulu.
+
+---
+
+## 12. Kenapa proses terasa lambat dan memakan banyak RAM?
+
+Ada dua kelompok penyebab: **masalah cluster** dan **biaya kerja Spark job**.
+
+### A. Saat cluster bermasalah
+
+Kalau YARN tidak punya resource efektif, job akan terlihat sangat lambat padahal sebenarnya hanya:
+
+- antre
+- retry koneksi ke ResourceManager
+- menunggu ApplicationMaster
+
+Pada kondisi ini, RAM di master tetap bisa terpakai oleh:
+
+- Spark driver
+- proses upload dependency ke HDFS
+- proses submit client ke YARN
+
+### B. Saat Spark job benar-benar jalan
+
+Sebelum diperbaiki, `spark_preprocess.py` cukup mahal karena:
+
+- memakai `inferSchema=True`, yang menambah beban baca CSV
+- memanggil `count()` sebelum filter
+- memanggil `count()` lagi setelah filter
+- menjalankan `groupBy().show()` untuk distribusi label
+- lalu menulis ulang hasil ke Parquet
+
+Ini membuat dataset besar bisa dibaca berulang kali.
+
+Sesudah perbaikan:
+
+- `inferSchema` dimatikan
+- `count()` dan distribusi label tidak jalan default
+- sampling bisa diatur
+- jumlah output partition bisa dikontrol
+
+### Gambaran kebutuhan memori
+
+Dengan konfigurasi:
+
+- `num-executors = 2`
+- `executor-cores = 2`
+- `executor-memory = 2G`
+- `driver-memory = 2G`
+
+maka footprint total riil biasanya lebih besar dari sekadar `2G + 2G + 2G`, karena masih ada:
+
+- memory overhead container YARN
+- ApplicationMaster
+- daemon Hadoop/YARN
+- proses Spark driver di master
+
+Jadi terasa besar itu wajar, terutama jika semua service cluster hidup bersamaan pada mesin kecil.
+
+---
+
+## 13. Bagaimana sebenarnya proses training dan apa saja yang dilakukan?
+
+Penting untuk dipisahkan antara **preprocessing Spark** dan **training model lokal**.
+
+### Jalur Spark: `preprocess_spark`
+
+Script ini ada di `machine_learning/src/spark_preprocess.py`.
+
+Yang dilakukan:
+
+1. Membaca `Books_rating.csv` dari HDFS.
+2. Rename kolom ke format project:
+   - `Title -> item_id`
+   - `User_id -> user_id`
+   - `review/score -> rating`
+   - `review/text -> review_text`
+3. Drop row yang kolom pentingnya kosong.
+4. Cast `rating` ke `float`.
+5. Filter `review_text` minimal 5 karakter.
+6. Bentuk label sentimen dari rating:
+   - `<= 2` = `Negative`
+   - `== 3` = `Neutral`
+   - `>= 4` = `Positive`
+7. Lakukan basic cleaning text:
+   - lowercase
+   - hapus URL
+   - hapus HTML tag
+   - hapus karakter non-huruf
+   - rapikan spasi
+8. Simpan hasil ke HDFS dalam format Parquet.
+
+Catatan penting:
+
+- ini **belum training model**
+- ini hanya preprocessing distributed
+- output-nya disimpan di HDFS
+
+### Jalur training lokal
+
+Training utama tetap lewat `machine_learning/main.py`.
+
+Step yang tersedia:
+
+- `preprocess`
+- `train_sentiment_baseline`
+- `train_sentiment_transformer`
+- `train_recommender`
+- `evaluate`
+
+### Apa yang dilakukan masing-masing training?
+
+#### `preprocess`
+
+Step ini:
+
+- load CSV lokal
+- bentuk label sentimen dari rating
+- lakukan cleaning text lokal
+- hapus stopword
+- lemmatization
+- simpan `processed_reviews.csv`
+- split ke `train.csv`, `validation.csv`, `test.csv`
+
+#### `train_sentiment_baseline`
+
+Step ini melatih 3 model baseline:
+
+- TF-IDF + Logistic Regression
+- TF-IDF + Multinomial Naive Bayes
+- TF-IDF + Linear SVM
+
+Lalu step ini:
+
+- evaluasi validation dan test
+- simpan model `.pkl`
+- simpan confusion matrix
+- simpan classification report
+- update model registry
+- log ke MLflow
+
+#### `train_sentiment_transformer`
+
+Step ini:
+
+- tokenize text dengan tokenizer Hugging Face
+- fine-tune `distilbert-base-uncased`
+- evaluasi validation dan test
+- simpan model, tokenizer, metrics, confusion matrix, report
+
+Ini juga masih berjalan lokal di master, bukan di worker YARN.
+
+#### `train_recommender`
+
+Step ini membuat beberapa komponen:
+
+- popularity-based ranking
+- collaborative filtering berbasis SVD
+- content-based scoring berbasis TF-IDF item text
+- hybrid score:
+  - `0.5 * collaborative`
+  - `0.3 * sentiment`
+  - `0.2 * popularity`
+
+Lalu dihitung metrik seperti:
+
+- RMSE
+- MAE
+- Precision@K
+- Recall@K
+- NDCG@K
+- coverage
+- diversity
+
+### Kesimpulan proses training
+
+Jadi alur project saat ini adalah:
+
+- **Spark/YARN** membantu preprocessing data
+- **pandas/scikit-learn/transformers lokal** melakukan training model
+- **report dan artifact utama** tetap tersimpan di master/local project
+
+Kalau target Anda adalah training penuh di cluster, maka langkah berikutnya adalah membuat step training membaca hasil Parquet dari HDFS atau memigrasikan model tertentu ke Spark MLlib / distributed training framework lain.

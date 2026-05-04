@@ -23,7 +23,10 @@ import yaml
 DEFAULT_NAMENODE_URI = "hdfs://fadhli:9000"
 DEFAULT_DATASET_HDFS_PATH = "/user/fadhli/amazon_books"
 DEFAULT_OUTPUT_HDFS_PATH = "/user/fadhli/output/amazon_books_ml"
-SAMPLE_FRACTION = 1.0  # 1.0 = pakai semua data, 0.1 = 10% untuk test cepat
+DEFAULT_SAMPLE_FRACTION = 1.0
+DEFAULT_LOG_ROW_COUNTS = False
+DEFAULT_SHOW_LABEL_DISTRIBUTION = False
+DEFAULT_OUTPUT_PARTITIONS = 0
 
 
 def _build_hdfs_uri(namenode_uri: str, hdfs_path: str) -> str:
@@ -32,20 +35,20 @@ def _build_hdfs_uri(namenode_uri: str, hdfs_path: str) -> str:
     return f"{normalized_namenode}{normalized_path}"
 
 
-def _resolve_hdfs_io_paths() -> tuple[str, str]:
+def _load_project_config() -> dict:
+    cfg_path = Path(__file__).resolve().parents[1] / "config.yaml"
+    if not cfg_path.exists():
+        return {}
+
+    with cfg_path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _resolve_hdfs_io_paths(cfg: dict) -> tuple[str, str]:
     env_input = os.environ.get("HDFS_INPUT_URI")
     env_output = os.environ.get("HDFS_OUTPUT_URI")
     if env_input and env_output:
         return env_input, env_output
-
-    cfg_path = Path(__file__).resolve().parents[1] / "config.yaml"
-    if not cfg_path.exists():
-        default_input = _build_hdfs_uri(DEFAULT_NAMENODE_URI, f"{DEFAULT_DATASET_HDFS_PATH}/Books_rating.csv")
-        default_output = _build_hdfs_uri(DEFAULT_NAMENODE_URI, f"{DEFAULT_OUTPUT_HDFS_PATH}/processed")
-        return default_input, default_output
-
-    with cfg_path.open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
 
     hadoop_cfg = cfg.get("hadoop", {})
     namenode_uri = hadoop_cfg.get("namenode_uri", DEFAULT_NAMENODE_URI)
@@ -55,6 +58,64 @@ def _resolve_hdfs_io_paths() -> tuple[str, str]:
     hdfs_input = env_input or _build_hdfs_uri(namenode_uri, f"{dataset_hdfs_path.rstrip('/')}/Books_rating.csv")
     hdfs_output = env_output or _build_hdfs_uri(namenode_uri, f"{output_hdfs_path.rstrip('/')}/processed")
     return hdfs_input, hdfs_output
+
+
+def _coerce_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _coerce_float(value: object, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_int(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_preprocess_options(cfg: dict) -> dict:
+    spark_preprocess_cfg = cfg.get("spark_preprocess", {})
+
+    sample_fraction = _coerce_float(
+        os.environ.get("SPARK_SAMPLE_FRACTION", spark_preprocess_cfg.get("sample_fraction")),
+        DEFAULT_SAMPLE_FRACTION,
+    )
+    if not 0 < sample_fraction <= 1.0:
+        sample_fraction = DEFAULT_SAMPLE_FRACTION
+
+    output_partitions = _coerce_int(
+        os.environ.get("SPARK_OUTPUT_PARTITIONS", spark_preprocess_cfg.get("output_partitions")),
+        DEFAULT_OUTPUT_PARTITIONS,
+    )
+    if output_partitions < 0:
+        output_partitions = DEFAULT_OUTPUT_PARTITIONS
+
+    return {
+        "sample_fraction": sample_fraction,
+        "log_row_counts": _coerce_bool(
+            os.environ.get("SPARK_LOG_ROW_COUNTS", spark_preprocess_cfg.get("log_row_counts")),
+            DEFAULT_LOG_ROW_COUNTS,
+        ),
+        "show_label_distribution": _coerce_bool(
+            os.environ.get("SPARK_SHOW_LABEL_DISTRIBUTION", spark_preprocess_cfg.get("show_label_distribution")),
+            DEFAULT_SHOW_LABEL_DISTRIBUTION,
+        ),
+        "output_partitions": output_partitions,
+    }
 
 
 def main() -> None:
@@ -74,18 +135,27 @@ def main() -> None:
     )
     spark.sparkContext.setLogLevel("WARN")
 
-    hdfs_input, hdfs_output = _resolve_hdfs_io_paths()
+    cfg = _load_project_config()
+    hdfs_input, hdfs_output = _resolve_hdfs_io_paths(cfg)
+    run_options = _resolve_preprocess_options(cfg)
 
-    print(f"[INFO] Membaca dataset dari HDFS: {hdfs_input}")
-    df = spark.read.csv(
-        hdfs_input,
-        header=True,
-        inferSchema=True,
-        multiLine=True,
-        escape='"',
+    print(
+        "[INFO] Opsi preprocess: "
+        f"sample_fraction={run_options['sample_fraction']}, "
+        f"log_row_counts={run_options['log_row_counts']}, "
+        f"show_label_distribution={run_options['show_label_distribution']}, "
+        f"output_partitions={run_options['output_partitions']}"
     )
 
-    print(f"[INFO] Total baris sebelum filter: {df.count()}")
+    print(f"[INFO] Membaca dataset dari HDFS: {hdfs_input}")
+    df = (
+        spark.read
+        .option("header", True)
+        .option("inferSchema", False)
+        .option("multiLine", True)
+        .option("escape", '"')
+        .csv(hdfs_input)
+    )
 
     # Rename kolom sesuai konvensi project
     rename_map = {
@@ -137,20 +207,33 @@ def main() -> None:
     df = df.withColumn("review_text_clean", F.regexp_replace("review_text_clean", r"\s+", " "))
     df = df.withColumn("review_text_clean", F.trim("review_text_clean"))
 
-    if SAMPLE_FRACTION < 1.0:
-        df = df.sample(fraction=SAMPLE_FRACTION, seed=42)
+    if run_options["sample_fraction"] < 1.0:
+        df = df.sample(fraction=run_options["sample_fraction"], seed=42)
+        print(f"[INFO] Sampling aktif: {run_options['sample_fraction']:.3f}")
 
-    total = df.count()
-    print(f"[INFO] Total baris setelah filter & cleaning: {total}")
+    should_materialize = run_options["log_row_counts"] or run_options["show_label_distribution"]
+    if should_materialize:
+        df = df.persist()
 
-    # Distribusi sentimen
-    print("[INFO] Distribusi label sentimen:")
-    df.groupBy("sentiment_text").count().orderBy("count", ascending=False).show()
+    if run_options["log_row_counts"]:
+        total = df.count()
+        print(f"[INFO] Total baris setelah filter & cleaning: {total}")
+
+    if run_options["show_label_distribution"]:
+        print("[INFO] Distribusi label sentimen:")
+        df.groupBy("sentiment_text").count().orderBy("count", ascending=False).show()
+
+    if run_options["output_partitions"] > 0:
+        df = df.coalesce(run_options["output_partitions"])
+        print(f"[INFO] Output akan ditulis dengan coalesce({run_options['output_partitions']})")
 
     # Simpan ke HDFS sebagai Parquet (efisien untuk dataset besar)
     print(f"[INFO] Menyimpan hasil ke HDFS: {hdfs_output}")
     df.write.mode("overwrite").parquet(hdfs_output)
     print("[INFO] Selesai. Data tersimpan di HDFS.")
+
+    if should_materialize:
+        df.unpersist()
 
     spark.stop()
 

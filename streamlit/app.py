@@ -6,8 +6,13 @@ from __future__ import annotations
 
 import getpass
 import json
+import queue
+import shlex
 import subprocess
 import sys
+import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -74,22 +79,201 @@ def _load_json(path: Path) -> Optional[Dict]:
         return None
 
 
+def _load_recommender_user_ids() -> List[str]:
+    hybrid_csv = ML_DIR / "models" / "recommender" / "hybrid" / "hybrid_recommendations.csv"
+    if not hybrid_csv.exists():
+        return []
+
+    try:
+        df = pd.read_csv(hybrid_csv, usecols=["user_id"])
+    except Exception:
+        return []
+
+    return sorted(df["user_id"].dropna().astype(str).unique().tolist())
+
+
+def _format_cmd(cmd: List[str]) -> str:
+    return " ".join(shlex.quote(part) for part in cmd)
+
+
 def _run(cmd: List[str], cwd: Path = ROOT_DIR, timeout: int = 300) -> Dict:
+    display_cmd = _format_cmd(cmd)
+    started_at = time.monotonic()
     try:
         r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
-        return {"cmd": " ".join(cmd), "rc": r.returncode, "out": r.stdout, "err": r.stderr}
+        return {
+            "cmd": display_cmd,
+            "rc": r.returncode,
+            "out": r.stdout,
+            "err": r.stderr,
+            "duration_sec": time.monotonic() - started_at,
+        }
     except subprocess.TimeoutExpired:
-        return {"cmd": " ".join(cmd), "rc": -1, "out": "", "err": "Timeout."}
+        return {
+            "cmd": display_cmd,
+            "rc": -1,
+            "out": "",
+            "err": "Timeout.",
+            "duration_sec": time.monotonic() - started_at,
+            "timed_out": True,
+        }
     except Exception as e:
-        return {"cmd": " ".join(cmd), "rc": -1, "out": "", "err": str(e)}
+        return {
+            "cmd": display_cmd,
+            "rc": -1,
+            "out": "",
+            "err": str(e),
+            "duration_sec": time.monotonic() - started_at,
+        }
 
 
-def _show_result(res: Dict) -> None:
-    st.code(res["cmd"], language="bash")
+def _enqueue_stream_output(name: str, stream: Any, sink: queue.Queue) -> None:
+    try:
+        for line in iter(stream.readline, ""):
+            sink.put((name, line))
+    finally:
+        sink.put((name, None))
+        stream.close()
+
+
+def _run_live(cmd: List[str], cwd: Path = ROOT_DIR, timeout: int = 300,
+              title: str = "Menjalankan command", max_visible_lines: int = 200) -> Dict:
+    display_cmd = _format_cmd(cmd)
+    stdout_lines: List[str] = []
+    stderr_lines: List[str] = []
+    stdout_tail = deque(maxlen=max_visible_lines)
+    stderr_tail = deque(maxlen=max_visible_lines)
+    started_at = time.monotonic()
+
+    with st.status(title, state="running", expanded=True) as live_status:
+        st.code(display_cmd, language="bash")
+        meta_placeholder = st.empty()
+
+        with st.expander("📄 Live Stdout", expanded=True):
+            stdout_placeholder = st.empty()
+
+        with st.expander("⚠️ Live Stderr", expanded=False):
+            stderr_placeholder = st.empty()
+
+        def render(state_label: str) -> None:
+            duration = time.monotonic() - started_at
+            meta_placeholder.caption(
+                f"Status: {state_label} | Durasi: {duration:.1f}s | "
+                f"Stdout: {len(stdout_lines)} baris | Stderr: {len(stderr_lines)} baris"
+            )
+            stdout_placeholder.code(
+                "".join(stdout_tail).rstrip() or "(menunggu stdout...)",
+                language="text",
+            )
+            stderr_placeholder.code(
+                "".join(stderr_tail).rstrip() or "(belum ada stderr)",
+                language="text",
+            )
+
+        render("menyiapkan proses")
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as e:
+            err_text = str(e)
+            stderr_lines.append(err_text)
+            stderr_tail.append(err_text)
+            render("gagal memulai")
+            live_status.update(label=f"{title} gagal dimulai", state="error", expanded=True)
+            return {
+                "cmd": display_cmd,
+                "rc": -1,
+                "out": "",
+                "err": err_text,
+                "duration_sec": time.monotonic() - started_at,
+            }
+
+        stream_queue: queue.Queue = queue.Queue()
+        stream_open = {"stdout": proc.stdout is not None, "stderr": proc.stderr is not None}
+
+        for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+            if stream is not None:
+                threading.Thread(
+                    target=_enqueue_stream_output,
+                    args=(name, stream, stream_queue),
+                    daemon=True,
+                ).start()
+
+        timed_out = False
+        last_render = 0.0
+
+        while True:
+            now = time.monotonic()
+            if proc.poll() is None and timeout and now - started_at > timeout and not timed_out:
+                timed_out = True
+                proc.kill()
+                timeout_msg = f"[ERROR] Timeout setelah {timeout} detik."
+                stderr_lines.append(timeout_msg)
+                stderr_tail.append(timeout_msg)
+
+            saw_new_line = False
+            while True:
+                wait_time = 0.2 if not saw_new_line else 0.0
+                try:
+                    stream_name, line = stream_queue.get(timeout=wait_time)
+                except queue.Empty:
+                    break
+
+                saw_new_line = True
+                if line is None:
+                    stream_open[stream_name] = False
+                    continue
+
+                if stream_name == "stdout":
+                    stdout_lines.append(line)
+                    stdout_tail.append(line)
+                else:
+                    stderr_lines.append(line)
+                    stderr_tail.append(line)
+
+            if saw_new_line or now - last_render >= 0.5:
+                phase = "sedang berjalan" if proc.poll() is None and not timed_out else "menyelesaikan output"
+                render(phase)
+                last_render = now
+
+            if proc.poll() is not None and not any(stream_open.values()) and stream_queue.empty():
+                break
+
+        rc = proc.wait() if proc.poll() is None else proc.returncode
+        render("selesai" if rc == 0 and not timed_out else "gagal")
+        live_status.update(
+            label=f"{title} selesai" if rc == 0 and not timed_out else f"{title} gagal",
+            state="complete" if rc == 0 and not timed_out else "error",
+            expanded=True,
+        )
+        return {
+            "cmd": display_cmd,
+            "rc": 0 if rc == 0 and not timed_out else -1 if timed_out else rc,
+            "out": "".join(stdout_lines),
+            "err": "".join(stderr_lines),
+            "duration_sec": time.monotonic() - started_at,
+            "timed_out": timed_out,
+        }
+
+
+def _show_result(res: Dict, show_command: bool = True) -> None:
+    if show_command:
+        st.code(res["cmd"], language="bash")
     if res["rc"] == 0:
         st.success("✅ Berhasil")
+    elif res.get("timed_out"):
+        st.error("❌ Gagal karena timeout")
     else:
         st.error(f"❌ Gagal (exit {res['rc']})")
+    if res.get("duration_sec") is not None:
+        st.caption(f"Durasi eksekusi: {res['duration_sec']:.1f} detik")
     c1, c2 = st.columns(2)
     with c1:
         with st.expander("📄 Stdout", expanded=res["rc"] == 0):
@@ -97,19 +281,6 @@ def _show_result(res: Dict) -> None:
     with c2:
         with st.expander("⚠️ Stderr", expanded=res["rc"] != 0):
             st.text(res["err"] or "(kosong)")
-
-
-def _ssh_ok(worker: str, timeout: int = 5) -> bool:
-    try:
-        r = subprocess.run(
-            ["ssh", "-o", f"ConnectTimeout={timeout}", "-o", "BatchMode=yes",
-             "-o", "StrictHostKeyChecking=no", worker, "echo OK"],
-            capture_output=True, text=True, timeout=timeout + 2
-        )
-        return r.returncode == 0 and "OK" in r.stdout
-    except Exception:
-        return False
-
 
 # ── TAB: OVERVIEW ────────────────────────────────────────────────────────────
 def tab_overview(cfg: Dict, ccfg: Dict) -> None:
@@ -382,16 +553,23 @@ def tab_inference(cfg: Dict) -> None:
 
     # Recommender
     st.subheader("📚 Recommender Inference")
-    user_id = st.text_input("User ID", placeholder="Masukkan user_id dari dataset...")
+    available_user_ids = _load_recommender_user_ids()
+    if available_user_ids:
+        st.caption(f"Tersedia {len(available_user_ids)} user_id dari artifact recommender yang siap dipakai.")
+        user_id = st.selectbox("Pilih User ID", available_user_ids, index=0)
+    else:
+        st.info("Belum ada daftar user_id. Latih recommender dulu agar pilihan user muncul otomatis.")
+        user_id = st.text_input("User ID", placeholder="Masukkan user_id dari hasil training recommender...")
+
     top_n   = st.slider("Top-N", 1, 20, 10)
     if st.button("Ambil Rekomendasi"):
-        if not user_id.strip():
+        if not str(user_id).strip():
             st.warning("Masukkan User ID terlebih dahulu.")
         else:
             try:
                 from src.inference import recommend_for_user
                 with st.spinner("Mengambil rekomendasi..."):
-                    recs = recommend_for_user(cfg, user_id.strip(), top_n)
+                    recs = recommend_for_user(cfg, str(user_id).strip(), top_n)
                 if not recs:
                     st.warning("Tidak ada rekomendasi untuk user tersebut.")
                 else:
@@ -420,8 +598,19 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
     if st.button("🔄 Cek Status SSH Worker"):
         status_rows = []
         for w in workers:
-            with st.spinner(f"Mengecek {w}..."):
-                ok = _ssh_ok(w, timeout)
+            res = _run_live(
+                [
+                    "ssh",
+                    "-o", f"ConnectTimeout={timeout}",
+                    "-o", "BatchMode=yes",
+                    "-o", "StrictHostKeyChecking=no",
+                    w,
+                    "echo OK",
+                ],
+                timeout=timeout + 2,
+                title=f"Mengecek SSH {w}",
+            )
+            ok = res["rc"] == 0 and "OK" in res["out"]
             status_rows.append({"Node": w, "SSH": "✅ Online" if ok else "❌ Offline"})
         st.dataframe(pd.DataFrame(status_rows), use_container_width=False, hide_index=True)
 
@@ -440,34 +629,77 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
     c1, c2 = st.columns(2)
     with c1:
         if st.button("▶️ Start Cluster", use_container_width=True):
-            with st.spinner("Starting..."):
-                res = _run(["bash", str(ROOT_DIR / "scripts" / "start_cluster.sh")])
-            _show_result(res)
+            res = _run_live(
+                ["bash", str(ROOT_DIR / "scripts" / "start_cluster.sh")],
+                title="Menjalankan start cluster",
+            )
+            _show_result(res, show_command=False)
     with c2:
         if st.button("⏹️ Stop Cluster", use_container_width=True):
-            with st.spinner("Stopping..."):
-                res = _run(["bash", str(ROOT_DIR / "scripts" / "stop_cluster.sh")])
-            _show_result(res)
+            res = _run_live(
+                ["bash", str(ROOT_DIR / "scripts" / "stop_cluster.sh")],
+                title="Menjalankan stop cluster",
+            )
+            _show_result(res, show_command=False)
+
+    # ---- Reset Training State ----
+    st.subheader("🧹 Reset Training State")
+    st.caption(
+        "Menghapus artifact training lokal agar simulasi bisa dimulai dari awal lagi. "
+        "Dataset mentah di `machine_learning/dataset/` tetap aman."
+    )
+    st.code(
+        "\n".join(
+            [
+                "Yang dibersihkan:",
+                "- machine_learning/data/processed",
+                "- machine_learning/models/sentiment",
+                "- machine_learning/models/recommender",
+                "- machine_learning/reports",
+                "- machine_learning/logs",
+                "- machine_learning/mlruns",
+                "- machine_learning/models/model_registry.json",
+            ]
+        ),
+        language="text",
+    )
+    confirm_reset = st.checkbox(
+        "Saya paham reset ini akan menghapus history training lokal",
+        key="confirm_reset_training",
+    )
+    if st.button(
+        "♻️ Reset Training",
+        use_container_width=True,
+        disabled=not confirm_reset,
+    ):
+        res = _run_live(
+            ["bash", str(ROOT_DIR / "scripts" / "reset_training_state.sh")],
+            timeout=600,
+            title="Membersihkan artifact training",
+        )
+        _show_result(res, show_command=False)
 
     # ---- Permission Fix ----
     st.subheader("🔐 Perbaiki Permission HDFS")
     st.caption("Mode ini bersifat permisif (world-writable) untuk mempermudah lab/testing cluster.")
     permission_target_user = st.text_input("Target user HDFS", value=getpass.getuser(), key="perm_target_user")
     if st.button("Fix Permission Worker1 & Worker2", use_container_width=True):
-        with st.spinner("Memperbaiki permission HDFS..."):
-            res = _run(
-                ["bash", str(ROOT_DIR / "scripts" / "fix_hdfs_permissions.sh"), permission_target_user],
-                timeout=600,
-            )
-        _show_result(res)
+        res = _run_live(
+            ["bash", str(ROOT_DIR / "scripts" / "fix_hdfs_permissions.sh"), permission_target_user],
+            timeout=600,
+            title="Memperbaiki permission HDFS",
+        )
+        _show_result(res, show_command=False)
 
     # ---- HDFS Upload ----
     st.subheader("📤 Upload Dataset ke HDFS")
     hdfs_target = st.text_input("HDFS Target Path", value=hdfs_cfg.get("dataset_path", _default_hdfs_dataset_path()))
     if st.button("Upload ke HDFS", use_container_width=True):
-        with st.spinner("Mengupload..."):
-            res = _run(["bash", str(ROOT_DIR / "scripts" / "upload_to_hdfs.sh"), hdfs_target])
-        _show_result(res)
+        res = _run_live(
+            ["bash", str(ROOT_DIR / "scripts" / "upload_to_hdfs.sh"), hdfs_target],
+            title="Mengupload dataset ke HDFS",
+        )
+        _show_result(res, show_command=False)
 
     # ---- Spark Submit ----
     st.subheader("⚡ Spark Submit (Distributed Training / Preprocessing)")
@@ -489,17 +721,23 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
             spark_step_key,
             str(int(n_exec)), str(int(e_cores)), e_mem, d_mem,
         ]
-        with st.spinner("Submitting Spark job ke YARN..."):
-            res = _run(cmd, timeout=600)
-        _show_result(res)
+        res = _run_live(
+            cmd,
+            timeout=600,
+            title="Submitting Spark job ke YARN",
+        )
+        _show_result(res, show_command=False)
 
     # ---- HDFS file browser ----
     st.subheader("🗂️ Browse HDFS")
     default_hdfs_path = hdfs_cfg.get("dataset_path", _default_hdfs_dataset_path())
     hdfs_path = st.text_input("HDFS Path", value=default_hdfs_path)
     if st.button("List HDFS"):
-        res = _run(["hdfs", "dfs", "-ls", "-h", hdfs_path])
-        _show_result(res)
+        res = _run_live(
+            ["hdfs", "dfs", "-ls", "-h", hdfs_path],
+            title="Membaca isi path HDFS",
+        )
+        _show_result(res, show_command=False)
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────

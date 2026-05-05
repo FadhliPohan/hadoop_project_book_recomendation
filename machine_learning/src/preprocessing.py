@@ -3,7 +3,8 @@ from __future__ import annotations
 import html
 import logging
 import re
-from typing import Dict, Tuple
+from datetime import datetime, timezone
+from typing import Dict, Set, Tuple
 
 import nltk
 import pandas as pd
@@ -11,8 +12,8 @@ from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from sklearn.model_selection import train_test_split
 
-from .data_loader import load_reviews
-from .utils import ensure_dir, resolve_path
+from .data_loader import load_reviews, load_reviews_from_hdfs_spark_output
+from .utils import ensure_dir, resolve_path, save_json
 
 URL_PATTERN = re.compile(r"https?://\S+|www\.\S+")
 HTML_PATTERN = re.compile(r"<[^>]+>")
@@ -64,10 +65,23 @@ def preprocess_text(text: str, stop_words: set[str], lemmatizer: WordNetLemmatiz
     return MULTI_SPACE_PATTERN.sub(" ", lemma).strip()
 
 
-def preprocess_and_split(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _load_preprocess_source(config: Dict, source: str) -> pd.DataFrame:
+    sample_rows = config["data"].get("sample_rows")
+    if source == "spark_hdfs":
+        return load_reviews_from_hdfs_spark_output(config, sample_rows=sample_rows)
+    if source == "local_dataset":
+        return load_reviews(config, sample_rows=sample_rows)
+    raise ValueError(f"Unknown preprocess source: {source}")
+
+
+def preprocess_and_split(
+    config: Dict,
+    source: str = "local_dataset",
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     _ensure_nltk_assets()
 
-    df = load_reviews(config)
+    logging.info("Preprocess source selected: %s", source)
+    df = _load_preprocess_source(config, source)
     df["sentiment_label"] = df["rating"].apply(rating_to_sentiment_label)
     df["sentiment_text"] = df["sentiment_label"].map(SENTIMENT_TEXT)
 
@@ -75,7 +89,12 @@ def preprocess_and_split(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
     lemmatizer = WordNetLemmatizer()
 
     logging.info("Preprocessing review text")
-    df["review_text_processed"] = df["review_text"].fillna("").apply(
+    base_text_series = (
+        df["review_text_clean"]
+        if source == "spark_hdfs" and "review_text_clean" in df.columns
+        else df["review_text"]
+    )
+    df["review_text_processed"] = base_text_series.fillna("").apply(
         lambda text: preprocess_text(text, stop_words, lemmatizer)
     )
 
@@ -112,5 +131,19 @@ def preprocess_and_split(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
     test.to_csv(test_path, index=False)
 
     logging.info("Saved splits train=%s val=%s test=%s", len(train), len(validation), len(test))
+
+    metadata_path = processed_path.parent / "preprocess_metadata.json"
+    save_json(
+        {
+            "source": source,
+            "rows_processed": int(len(df)),
+            "train_rows": int(len(train)),
+            "validation_rows": int(len(validation)),
+            "test_rows": int(len(test)),
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        },
+        metadata_path,
+    )
+    logging.info("Saved preprocessing metadata to %s", metadata_path)
 
     return train, validation, test

@@ -14,4 +14,6 @@ scipy
 joblib
 tqdm
 pyyaml
+pyspark
+pyarrow
 streamlit

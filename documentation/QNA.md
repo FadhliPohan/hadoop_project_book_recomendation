@@ -127,9 +127,205 @@ Ada 3 level solusi:
 
 ### Rekomendasi operasional saat ini
 
-- Pakai tab Spark untuk **distributed preprocessing** saja.
+- Pakai tab Spark untuk **distributed preprocessing**.
 - Pakai Pipeline tab atau `machine_learning/main.py` untuk training model dan generate report di master.
+- Jika ingin training memakai hasil Spark, jalankan `preprocess` atau `all` dengan source `spark_hdfs`.
 - Anggap HDFS sebagai lokasi output data antara, sedangkan master/local project tetap menjadi lokasi artifact model dan laporan.
+
+---
+
+## Update Integrasi 2026-05-05: Apakah pipeline training masih membaca dataset dari master?
+
+### Jawaban untuk kondisi lama
+
+**Ya, benar.**
+
+Sebelum integrasi opsi source ini ditambahkan, alurnya memang seperti berikut:
+
+- `preprocess_spark` menulis hasil ke HDFS dalam format Parquet
+- tetapi `train_sentiment_baseline`, `train_sentiment_transformer`, dan `train_recommender` tetap membaca:
+  - `machine_learning/data/processed/processed_reviews.csv`
+  - `machine_learning/data/processed/train.csv`
+  - `machine_learning/data/processed/validation.csv`
+  - `machine_learning/data/processed/test.csv`
+
+Jadi training **bukan langsung** membaca hasil `Spark Submit`, melainkan membaca split lokal di master.
+
+### Bukti arsitektur dari kode
+
+- `spark_preprocess.py` menyimpan output ke HDFS, bukan ke folder training lokal.
+- `preprocessing.py` adalah step yang membentuk `processed_reviews.csv`, `train.csv`, `validation.csv`, dan `test.csv`.
+- Semua step training membaca file split lokal itu.
+
+Artinya, pada desain lama ada **gap integrasi**:
+
+- jalur distributed preprocessing ada
+- jalur local training ada
+- tetapi belum ada jembatan resmi antara keduanya
+
+### Apa yang sudah ditambahkan sekarang?
+
+Sekarang pipeline punya **2 mode sumber data**:
+
+1. `local_dataset`
+   - membaca `machine_learning/dataset/Books_rating.csv`
+   - ini adalah mode manual/lokal seperti sebelumnya
+2. `spark_hdfs`
+   - membaca hasil `preprocess_spark` dari HDFS
+   - lalu mematerialisasikannya kembali ke:
+     - `machine_learning/data/processed/processed_reviews.csv`
+     - `machine_learning/data/processed/train.csv`
+     - `machine_learning/data/processed/validation.csv`
+     - `machine_learning/data/processed/test.csv`
+   - setelah itu step training tetap berjalan seperti biasa
+
+Jadi sekarang **bisa dilakukan** dan memang sudah dibuat opsinya, tetapi model training-nya tetap lokal di master. Yang berubah adalah **sumber data preprocess untuk training**, bukan lokasi training model.
+
+### Opsi baru ini tersedia di mana?
+
+Ada 2 cara:
+
+#### A. Dari dashboard Streamlit
+
+Di tab `Pipeline`, untuk step:
+
+- `EDA`
+- `Preprocess`
+- `All`
+
+sekarang ada pilihan `Sumber Data`:
+
+- `Dataset Lokal Master`
+- `Hasil Spark Submit di HDFS`
+
+#### B. Dari CLI
+
+Contoh mode lokal:
+
+```bash
+python3 machine_learning/main.py --step preprocess --preprocess-source local_dataset
+python3 machine_learning/main.py --step all --preprocess-source local_dataset --allow-training
+```
+
+Contoh mode hasil Spark:
+
+```bash
+python3 machine_learning/main.py --step preprocess --preprocess-source spark_hdfs
+python3 machine_learning/main.py --step all --preprocess-source spark_hdfs --allow-training
+```
+
+### Bagaimana proses `spark_hdfs` bekerja sekarang?
+
+Alurnya seperti ini:
+
+1. Anda jalankan `⚡ Spark Submit`.
+2. Spark membaca CSV dari HDFS, membersihkan data, memberi label sentimen, dan menyimpan hasil Parquet ke HDFS.
+3. Anda jalankan `preprocess` atau `all` dengan source `spark_hdfs`.
+4. Pipeline lokal mengambil folder Parquet itu dari HDFS ke temporary local.
+5. Data hasil Spark diubah menjadi DataFrame lokal di master.
+6. Pipeline tetap melakukan tahap lokal yang memang masih dibutuhkan:
+   - stopword removal
+   - lemmatization
+   - pembentukan `review_text_processed`
+   - split train/validation/test
+7. Hasil split disimpan ke folder `machine_learning/data/processed/`.
+8. Training baseline / transformer / recommender memakai hasil split lokal tersebut.
+
+### Kenapa masih ada tahap lokal walaupun source-nya dari Spark?
+
+Karena hasil `preprocess_spark` saat ini baru sampai:
+
+- filtering
+- labeling
+- basic text cleaning
+
+Output Spark menghasilkan kolom seperti `review_text_clean`, tetapi training lokal di project ini masih mengandalkan `review_text_processed`, yang dibentuk oleh:
+
+- stopword removal NLTK
+- lemmatization
+
+Jadi mode `spark_hdfs` saat ini adalah **bridge architecture**:
+
+- bagian awal preprocessing dikerjakan terdistribusi
+- bagian akhir feature text untuk model tetap difinalisasi lokal
+
+### Apakah ini berarti training sekarang sudah distributed?
+
+**Belum.**
+
+Yang sekarang berubah adalah:
+
+- data untuk preprocess bisa berasal dari output distributed Spark
+
+Yang **belum berubah**:
+
+- training baseline tetap lokal di master
+- training transformer tetap lokal di master
+- training recommender tetap lokal di master
+- report dan metrics tetap disimpan di master
+
+### Lalu apa keuntungan mode `spark_hdfs`?
+
+Keuntungannya cukup penting:
+
+- filter dan cleaning awal dataset besar bisa dipindahkan ke cluster
+- data mentah yang dibaca training lokal menjadi lebih siap
+- Anda punya jalur yang lebih realistis untuk eksperimen semi-distributed
+- pipeline sekarang tidak lagi “putus” antara Spark Submit dan training
+
+### Apa keterbatasannya?
+
+Tetap ada beberapa batasan yang perlu dipahami:
+
+- master tetap menjadi bottleneck saat data hasil HDFS dimaterialisasikan ke lokal
+- step training belum memakai worker untuk fitting model
+- split train/validation/test masih dibuat di master
+- jika dataset terlalu besar, limit `sample_rows` tetap berpengaruh pada bridge lokal
+
+### Bagaimana cara mengecek source terakhir yang dipakai?
+
+Sesudah preprocess berjalan, pipeline sekarang menyimpan metadata di:
+
+- `machine_learning/data/processed/preprocess_metadata.json`
+
+Dashboard `Overview` juga menampilkan sumber preprocess terakhir, sehingga lebih mudah mengecek apakah hasil training terakhir berasal dari:
+
+- dataset lokal master
+- atau hasil distributed preprocessing di HDFS
+
+### Rekomendasi penggunaan
+
+Pakai `local_dataset` jika:
+
+- Anda ingin eksperimen cepat
+- cluster sedang tidak dipakai
+- Anda ingin alur paling sederhana
+
+Pakai `spark_hdfs` jika:
+
+- Anda sudah menjalankan `preprocess_spark`
+- dataset mentah cukup besar
+- Anda ingin training memakai hasil cleaning distributed Spark sebagai sumber input
+
+### Kesimpulan analisa mendalam
+
+Jadi pertanyaan Anda **benar**:
+
+- pada desain lama, training memang masih membaca data lokal di master
+
+Dan jawabannya untuk pertanyaan kedua juga **bisa**:
+
+- sekarang sudah tersedia dua mode sumber data
+- `local_dataset` untuk alur manual/lokal
+- `spark_hdfs` untuk alur yang memakai hasil `Spark Submit`
+
+Namun perlu diingat, mode `spark_hdfs` saat ini adalah:
+
+- **integrasi distributed preprocessing ke local training**
+
+bukan:
+
+- **distributed model training end-to-end**
 
 ---
 

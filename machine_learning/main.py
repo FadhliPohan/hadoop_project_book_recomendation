@@ -34,6 +34,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Wajib di-set jika ingin menjalankan step training.",
     )
+    parser.add_argument(
+        "--preprocess-source",
+        choices=["local_dataset", "spark_hdfs"],
+        default="local_dataset",
+        help=(
+            "Sumber data untuk step preprocess. "
+            "`local_dataset` membaca CSV lokal mentah, "
+            "`spark_hdfs` membaca hasil distributed preprocessing dari HDFS lalu membuat split lokal."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -43,6 +53,7 @@ def main() -> None:
     setup_logging()
 
     logging.info("Running step: %s", args.step)
+    logging.info("Preprocess source: %s", args.preprocess_source)
     if args.step in TRAINING_STEPS and not args.allow_training:
         raise ValueError(
             "Step training diblokir untuk mencegah training otomatis. "
@@ -52,13 +63,13 @@ def main() -> None:
     if args.step == "eda":
         from src.eda import run_eda
 
-        run_eda(config)
+        run_eda(config, source=args.preprocess_source)
         return
 
     if args.step == "preprocess":
         from src.preprocessing import preprocess_and_split
 
-        preprocess_and_split(config)
+        preprocess_and_split(config, source=args.preprocess_source)
         return
 
     if args.step == "train_sentiment_baseline":
@@ -91,8 +102,8 @@ def main() -> None:
         from src.preprocessing import preprocess_and_split
 
         # Default mode aman: no-training. Cocok untuk iterasi coding.
-        run_eda(config)
-        preprocess_and_split(config)
+        run_eda(config, source=args.preprocess_source)
+        preprocess_and_split(config, source=args.preprocess_source)
         if args.allow_training:
             from src.train_recommender import train_recommenders
             from src.train_sentiment import train_baseline_sentiment

@@ -412,6 +412,22 @@ def tab_overview(cfg: Dict, ccfg: Dict) -> None:
         rows.append({"Artifact": name, "Status": "✅ Ada" if ex else "❌ Belum", "Ukuran": sz})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+    preprocess_meta = _load_json(ML_DIR / "data" / "processed" / "preprocess_metadata.json")
+    if preprocess_meta:
+        source = preprocess_meta.get("source", "unknown")
+        source_label = (
+            "Hasil Spark Submit di HDFS"
+            if source == "spark_hdfs"
+            else "Dataset lokal master"
+            if source == "local_dataset"
+            else source
+        )
+        st.caption(
+            "Sumber preprocess terakhir: "
+            f"{source_label} | rows={preprocess_meta.get('rows_processed', '—')} | "
+            f"generated_at={preprocess_meta.get('generated_at_utc', '—')}"
+        )
+
     # Quick metrics from final report
     report = _load_json(ML_DIR / "reports" / "final_report.json")
     if report:
@@ -523,8 +539,32 @@ def tab_pipeline(cfg: Dict) -> None:
     if needs_train and not allow:
         st.warning(f"⚠️ Step `{step_key}` memerlukan flag `--allow-training`.")
 
+    preprocess_source = "local_dataset"
+    if step_key in {"eda", "preprocess", "all"}:
+        preprocess_source = st.selectbox(
+            "Sumber Data",
+            ["local_dataset", "spark_hdfs"],
+            format_func=lambda v: (
+                "Dataset Lokal Master — machine_learning/dataset/Books_rating.csv"
+                if v == "local_dataset"
+                else "Hasil Spark Submit di HDFS — output distributed preprocessing"
+            ),
+        )
+        if preprocess_source == "spark_hdfs":
+            st.info(
+                "Mode ini memakai hasil `preprocess_spark` dari HDFS. Untuk step `preprocess` dan `all`, "
+                "hasil tersebut akan dimaterialisasikan kembali ke `machine_learning/data/processed/` "
+                "agar step training lokal bisa memakainya."
+            )
+        else:
+            st.caption(
+                "Mode ini membaca dataset mentah lokal di master dan menjalankan EDA/preprocessing dari dataset lokal."
+            )
+
     if st.button("▶️ Jalankan", type="primary", use_container_width=True):
         cmd = [_python_bin(), "machine_learning/main.py", "--step", step_key]
+        if step_key in {"eda", "preprocess", "all"}:
+            cmd.extend(["--preprocess-source", preprocess_source])
         if allow:
             cmd.append("--allow-training")
         with st.spinner(f"Menjalankan: {step_label}..."):

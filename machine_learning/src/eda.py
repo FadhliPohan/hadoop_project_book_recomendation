@@ -7,7 +7,7 @@ from typing import Dict
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from .data_loader import load_reviews
+from .data_loader import load_reviews, load_reviews_from_hdfs_spark_output
 from .utils import ensure_dir, resolve_path
 
 
@@ -16,11 +16,18 @@ def _save_series(series: pd.Series, path: Path, index_name: str, value_name: str
     out.to_csv(path, index=False)
 
 
-def run_eda(config: Dict) -> Dict:
+def run_eda(config: Dict, source: str = "local_dataset") -> Dict:
     eda_dir = resolve_path(config, "eda_dir")
     ensure_dir(eda_dir)
 
-    df = load_reviews(config)
+    if source == "spark_hdfs":
+        df = load_reviews_from_hdfs_spark_output(config, sample_rows=config["data"].get("sample_rows"))
+    elif source == "local_dataset":
+        df = load_reviews(config)
+    else:
+        raise ValueError(f"Unknown EDA source: {source}")
+
+    logging.info("EDA source selected: %s", source)
     logging.info("EDA on %s rows", len(df))
 
     missing = df.isna().sum().sort_values(ascending=False)

@@ -1,6 +1,6 @@
 # Q&A Analisa Project Hadoop Amazon Books Reviews
 
-Tanggal analisa: 2026-05-04
+Tanggal analisa: 2026-05-05
 
 ## Ringkasan Singkat
 
@@ -34,6 +34,102 @@ Artinya, walaupun konfigurasi cluster di luar repo tetap harus sehat, project in
 - mendeteksi problem cluster lebih awal
 - mengurangi preprocessing Spark yang tidak perlu
 - memberi kontrol performa langsung dari dashboard
+
+---
+
+## Update Analisa 2026-05-05: Kenapa hasil Spark tidak muncul di master?
+
+Ini adalah akar masalah yang paling relevan dengan kendala pada halaman **Spark Submit**.
+
+### Temuan utama dari kode aktif
+
+- Di dashboard, tab Spark hanya menyediakan step `preprocess_spark`.
+- Di `scripts/spark_submit_training.sh`, hanya `preprocess_spark` yang benar-benar dijalankan lewat `spark-submit --master yarn`.
+- Di `machine_learning/src/spark_preprocess.py`, output akhir ditulis dengan `df.write.mode("overwrite").parquet(...)` ke path HDFS `.../output/amazon_books_ml/processed`.
+- Tidak ada step lanjutan yang menyalin hasil Spark dari HDFS ke folder lokal `machine_learning/data/processed/`.
+- Training baseline, transformer, dan recommender membaca input dari file lokal:
+  - `machine_learning/data/processed/processed_reviews.csv`
+  - `machine_learning/data/processed/train.csv`
+  - `machine_learning/data/processed/validation.csv`
+  - `machine_learning/data/processed/test.csv`
+- Dashboard Overview dan Reports juga membaca artifact lokal di master, bukan hasil Parquet di HDFS.
+
+### Arti praktisnya
+
+Kalau log Spark Anda berakhir seperti ini:
+
+- `Menyimpan hasil ke HDFS: hdfs://fadhli:9000/user/fadhli/output/amazon_books_ml/processed`
+- `Selesai. Data tersimpan di HDFS.`
+
+maka itu berarti job yang sukses adalah **distributed preprocessing**, bukan training model end-to-end.
+
+Jadi sangat wajar bila setelah submit Spark:
+
+- belum ada `metrics.json` baru di master
+- belum ada `final_report.json` baru di master
+- dashboard belum menampilkan hasil training baru
+
+Karena yang berubah adalah isi **HDFS**, bukan folder report lokal.
+
+### Di mana hasilnya harus dicek?
+
+Untuk run Spark yang sukses, lokasi pertama yang harus dicek adalah:
+
+- `hdfs://fadhli:9000/user/fadhli/output/amazon_books_ml/processed`
+
+Bukan:
+
+- `machine_learning/reports/`
+- `machine_learning/models/`
+- `machine_learning/data/processed/`
+
+### Bagaimana cara mengambil hasil dari HDFS secara manual?
+
+Kalau ingin mengambil hasil Spark atau file lain dari HDFS ke local master secara manual, gunakan:
+
+```bash
+hdfs dfs -ls -h /user/fadhli/output/amazon_books_ml/processed
+hdfs dfs -get /user/fadhli/output/amazon_books_ml/processed ./hasil_dari_hdfs
+```
+
+Penting:
+
+- Jika target adalah output Spark `Parquet`, biasanya yang tersimpan adalah **folder**, bukan satu file tunggal.
+- Karena itu ambil **seluruh folder** `processed`, jangan hanya satu `part-....parquet`.
+- Setelah diambil ke lokal, barulah data bisa diperiksa manual, di-convert, atau dipakai untuk step lanjutan.
+
+### Apakah sekarang ada tombol download di dashboard?
+
+Ya. Pada tab `Cluster`, bagian `Download Dari HDFS`, sekarang Anda bisa:
+
+- memasukkan path file atau folder HDFS
+- menekan tombol siapkan download
+- mengunduh hasilnya langsung dari dashboard
+
+Jika path yang dipilih adalah folder, dashboard akan:
+
+- mengambil isi folder dari HDFS ke temporary local
+- mengemasnya menjadi file `.zip`
+- lalu menyediakan tombol download
+
+### Apakah bisa dibuat seperti training manual tanpa cluster?
+
+**Bisa, tetapi belum dilakukan oleh arsitektur sekarang.**
+
+Ada 3 level solusi:
+
+1. **Solusi paling realistis untuk project ini**
+   Tambahkan step penghubung yang membaca Parquet hasil Spark dari HDFS, lalu menulis ulang ke CSV lokal `machine_learning/data/processed/`, setelah itu training lokal dan `evaluate` tetap berjalan seperti sekarang.
+2. **Solusi yang lebih rapi**
+   Ubah seluruh step training agar bisa langsung membaca Parquet dari HDFS, sehingga tidak perlu copy ke lokal dulu.
+3. **Solusi skala besar penuh**
+   Migrasikan training model ke framework distributed seperti Spark MLlib atau pendekatan distributed training lain. Ini perubahan arsitektur yang jauh lebih besar.
+
+### Rekomendasi operasional saat ini
+
+- Pakai tab Spark untuk **distributed preprocessing** saja.
+- Pakai Pipeline tab atau `machine_learning/main.py` untuk training model dan generate report di master.
+- Anggap HDFS sebagai lokasi output data antara, sedangkan master/local project tetap menjadi lokasi artifact model dan laporan.
 
 ---
 
@@ -180,7 +276,9 @@ Saat ini ada dua jalur:
   - membaca CSV dari HDFS
   - menyimpan hasil ke HDFS dalam bentuk Parquet
 
-Masalahnya, training lokal saat ini **belum membaca Parquet hasil Spark dari HDFS**. Jadi distributed preprocessing memang ada, tetapi belum otomatis menjadi input training lokal.
+Masalahnya, training lokal saat ini **belum membaca Parquet hasil Spark dari HDFS**. Bahkan pada kode aktif sekarang juga **belum ada step sinkronisasi HDFS ke lokal** yang menyalin hasil `processed` ke `machine_learning/data/processed/`.
+
+Jadi distributed preprocessing memang ada, tetapi belum otomatis menjadi input training lokal.
 
 ---
 

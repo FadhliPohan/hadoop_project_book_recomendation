@@ -6,14 +6,17 @@ from __future__ import annotations
 
 import getpass
 import json
+import mimetypes
 import queue
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -281,6 +284,114 @@ def _show_result(res: Dict, show_command: bool = True) -> None:
     with c2:
         with st.expander("⚠️ Stderr", expanded=res["rc"] != 0):
             st.text(res["err"] or "(kosong)")
+
+
+def _format_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024.0 or unit == "TB":
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{num_bytes} B"
+
+
+def _hdfs_basename(hdfs_path: str) -> str:
+    normalized = hdfs_path.strip().rstrip("/")
+    if not normalized:
+        return "hdfs_export"
+    name = PurePosixPath(normalized).name
+    return name or "hdfs_export"
+
+
+def _prepare_hdfs_download(hdfs_path: str, timeout: int = 600) -> Dict[str, Any]:
+    source_path = hdfs_path.strip()
+    if not source_path:
+        return {
+            "cmd": "hdfs download",
+            "rc": -1,
+            "out": "",
+            "err": "HDFS path tidak boleh kosong.",
+            "duration_sec": 0.0,
+        }
+
+    started_at = time.monotonic()
+
+    exists = _run(["hdfs", "dfs", "-test", "-e", source_path], timeout=timeout)
+    if exists["rc"] != 0:
+        return {
+            "cmd": f"hdfs dfs -test -e {source_path}",
+            "rc": exists["rc"],
+            "out": exists["out"],
+            "err": exists["err"] or f"Path HDFS tidak ditemukan: {source_path}",
+            "duration_sec": time.monotonic() - started_at,
+        }
+
+    is_dir = _run(["hdfs", "dfs", "-test", "-d", source_path], timeout=timeout)["rc"] == 0
+
+    temp_root = Path(tempfile.mkdtemp(prefix="hdfs_download_", dir="/tmp"))
+    base_name = _hdfs_basename(source_path)
+
+    if is_dir:
+        local_parent = temp_root / "payload"
+        local_parent.mkdir(parents=True, exist_ok=True)
+        fetch_cmd = ["hdfs", "dfs", "-get", "-f", source_path, str(local_parent)]
+        fetch_res = _run(fetch_cmd, timeout=timeout)
+        if fetch_res["rc"] != 0:
+            return fetch_res
+
+        local_target = local_parent / base_name
+        archive_path = shutil.make_archive(
+            str(temp_root / base_name),
+            "zip",
+            root_dir=str(local_parent),
+            base_dir=base_name,
+        )
+        archive_file = Path(archive_path)
+        payload = archive_file.read_bytes()
+        return {
+            "cmd": fetch_res["cmd"],
+            "rc": 0,
+            "out": (
+                f"Folder HDFS berhasil diambil dan di-zip.\n"
+                f"Source: {source_path}\n"
+                f"Local temp: {local_target}\n"
+                f"Archive: {archive_file}"
+            ),
+            "err": fetch_res["err"],
+            "duration_sec": time.monotonic() - started_at,
+            "download_name": f"{base_name}.zip",
+            "download_mime": "application/zip",
+            "download_bytes": payload,
+            "download_size": len(payload),
+            "download_kind": "directory",
+            "source_path": source_path,
+        }
+
+    local_target = temp_root / base_name
+    fetch_cmd = ["hdfs", "dfs", "-get", "-f", source_path, str(local_target)]
+    fetch_res = _run(fetch_cmd, timeout=timeout)
+    if fetch_res["rc"] != 0:
+        return fetch_res
+
+    payload = local_target.read_bytes()
+    mime_type, _ = mimetypes.guess_type(local_target.name)
+    return {
+        "cmd": fetch_res["cmd"],
+        "rc": 0,
+        "out": (
+            f"File HDFS berhasil diambil.\n"
+            f"Source: {source_path}\n"
+            f"Local temp: {local_target}"
+        ),
+        "err": fetch_res["err"],
+        "duration_sec": time.monotonic() - started_at,
+        "download_name": local_target.name,
+        "download_mime": mime_type or "application/octet-stream",
+        "download_bytes": payload,
+        "download_size": len(payload),
+        "download_kind": "file",
+        "source_path": source_path,
+    }
 
 # ── TAB: OVERVIEW ────────────────────────────────────────────────────────────
 def tab_overview(cfg: Dict, ccfg: Dict) -> None:
@@ -664,19 +775,50 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
         ),
         language="text",
     )
+    include_hadoop_reset = st.checkbox(
+        "Sertakan reset Hadoop/HDFS/history di master dan semua worker",
+        key="include_hadoop_reset",
+    )
+    if include_hadoop_reset:
+        st.warning(
+            "Mode ini sangat destruktif: cluster akan dihentikan, state NameNode/DataNode/YARN/log Hadoop "
+            "dibersihkan, NameNode diformat ulang, dan dataset di HDFS harus di-upload kembali."
+        )
+        st.code(
+            "\n".join(
+                [
+                    "Tambahan yang dibersihkan saat mode Hadoop aktif:",
+                    "- /data/hadoop/hdfs/namenode (master)",
+                    "- /data/hadoop/hdfs/datanode (master + worker)",
+                    "- /data/hadoop/tmp (master + worker)",
+                    "- /usr/local/hadoop/logs (master + worker)",
+                    "- histori HDFS/YARN yang tersimpan pada state directory di atas",
+                ]
+            ),
+            language="text",
+        )
     confirm_reset = st.checkbox(
         "Saya paham reset ini akan menghapus history training lokal",
         key="confirm_reset_training",
     )
+    confirm_hadoop_reset = True
+    if include_hadoop_reset:
+        confirm_hadoop_reset = st.checkbox(
+            "Saya paham reset ini juga akan menghapus state Hadoop/HDFS/history cluster",
+            key="confirm_reset_hadoop",
+        )
     if st.button(
         "♻️ Reset Training",
         use_container_width=True,
-        disabled=not confirm_reset,
+        disabled=not confirm_reset or not confirm_hadoop_reset,
     ):
+        cmd = ["bash", str(ROOT_DIR / "scripts" / "reset_training_state.sh")]
+        if include_hadoop_reset:
+            cmd.append("--include-hadoop-state")
         res = _run_live(
-            ["bash", str(ROOT_DIR / "scripts" / "reset_training_state.sh")],
-            timeout=600,
-            title="Membersihkan artifact training",
+            cmd,
+            timeout=1800 if include_hadoop_reset else 600,
+            title="Membersihkan artifact training dan Hadoop" if include_hadoop_reset else "Membersihkan artifact training",
         )
         _show_result(res, show_command=False)
 
@@ -703,7 +845,12 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
         _show_result(res, show_command=False)
 
     # ---- Spark Submit ----
-    st.subheader("⚡ Spark Submit (Distributed Training / Preprocessing)")
+    st.subheader("⚡ Spark Submit (Distributed Preprocessing via YARN)")
+    st.info(
+        "Tab ini saat ini hanya menjalankan `preprocess_spark`. Output Spark ditulis ke HDFS, "
+        "sedangkan training model (`train_sentiment_baseline`, `train_sentiment_transformer`, "
+        "`train_recommender`) dan `final_report.json` tetap dibuat lewat pipeline lokal di master."
+    )
     with st.expander("Konfigurasi Spark"):
         col1, col2, col3, col4 = st.columns(4)
         n_exec  = col1.number_input("num-executors",   value=int(sp_cfg.get("num_executors", 2)),   min_value=1, max_value=10)
@@ -744,7 +891,8 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
         )
         st.caption(
             "Timeout ini hanya batas tunggu dashboard. Wrapper `spark_submit_training.sh` "
-            "sekarang menjalankan preflight YARN dan warning hostname sebelum submit."
+            "sekarang menjalankan preflight YARN dan warning hostname sebelum submit. "
+            "Job ini tidak otomatis menyalin hasil ke folder `machine_learning/` di master."
         )
 
     spark_step = st.selectbox("Step Spark", [
@@ -775,12 +923,69 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
     st.subheader("🗂️ Browse HDFS")
     default_hdfs_path = hdfs_cfg.get("dataset_path", _default_hdfs_dataset_path())
     hdfs_path = st.text_input("HDFS Path", value=default_hdfs_path)
+    st.caption(
+        "Ambil data HDFS secara manual dengan `hdfs dfs -get <hdfs_path> <lokasi_lokal>`. "
+        "Untuk output Spark berupa Parquet folder, ambil seluruh foldernya, bukan hanya satu part file."
+    )
+    st.code(
+        "\n".join(
+            [
+                f"hdfs dfs -ls -h {hdfs_path}",
+                f"hdfs dfs -get {hdfs_path} ./hasil_dari_hdfs",
+            ]
+        ),
+        language="bash",
+    )
     if st.button("List HDFS"):
         res = _run_live(
             ["hdfs", "dfs", "-ls", "-h", hdfs_path],
             title="Membaca isi path HDFS",
         )
         _show_result(res, show_command=False)
+
+    st.subheader("⬇️ Download Dari HDFS")
+    st.caption(
+        "Masukkan file atau folder HDFS. Jika target adalah folder seperti output Parquet Spark, "
+        "dashboard akan mengunduh lalu mengemasnya menjadi `.zip`."
+    )
+    download_hdfs_path = st.text_input(
+        "HDFS Path untuk Download",
+        value=hdfs_cfg.get("output_path", _default_hdfs_output_path()),
+        key="hdfs_download_path",
+    )
+    download_timeout = st.number_input(
+        "download-timeout (detik)",
+        value=600,
+        min_value=60,
+        max_value=14400,
+        step=60,
+        key="hdfs_download_timeout",
+    )
+    if st.button("Siapkan Download HDFS", use_container_width=True):
+        download_res = _prepare_hdfs_download(download_hdfs_path, timeout=int(download_timeout))
+        if download_res["rc"] == 0:
+            st.session_state["hdfs_download_payload"] = download_res
+        else:
+            st.session_state.pop("hdfs_download_payload", None)
+        _show_result(download_res, show_command=False)
+
+    prepared_download = st.session_state.get("hdfs_download_payload")
+    if prepared_download and prepared_download.get("source_path") == download_hdfs_path:
+        st.success(
+            "File siap diunduh: "
+            f"{prepared_download['download_name']} "
+            f"({_format_size(int(prepared_download['download_size']))})"
+        )
+        if prepared_download.get("download_kind") == "directory":
+            st.info("Target HDFS berupa folder. Dashboard mengirimkannya sebagai arsip `.zip`.")
+        st.download_button(
+            "Download HDFS Sekarang",
+            data=prepared_download["download_bytes"],
+            file_name=prepared_download["download_name"],
+            mime=prepared_download["download_mime"],
+            use_container_width=True,
+            key="download_hdfs_button",
+        )
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────

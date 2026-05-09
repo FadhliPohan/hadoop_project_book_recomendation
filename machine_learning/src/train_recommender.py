@@ -269,19 +269,53 @@ def _load_processed_interactions(processed_path: Path) -> pd.DataFrame:
     usecols = ["user_id", "item_id", "rating", "sentiment_label", "review_text_processed"]
     read_kwargs = {
         "usecols": usecols,
-        "dtype": {"rating": "float32", "sentiment_label": "int8"},
+        "dtype": {
+            "user_id": "string",
+            "item_id": "string",
+            "rating": "float32",
+            "sentiment_label": "int8",
+            "review_text_processed": "string",
+        },
         "low_memory": True,
     }
-    try:
-        return pd.read_csv(processed_path, **read_kwargs)
-    except pd.errors.ParserError as exc:
-        if "out of memory" not in str(exc).lower():
-            raise
-        logging.warning("Parser C kehabisan memori saat baca %s. Fallback ke engine='python'.", processed_path)
-        return pd.read_csv(processed_path, engine="python", **read_kwargs)
-    except MemoryError:
-        logging.warning("MemoryError saat baca %s. Fallback ke engine='python'.", processed_path)
-        return pd.read_csv(processed_path, engine="python", **read_kwargs)
+
+    def _read_chunked(engine: str, chunksize: int) -> pd.DataFrame:
+        reader = pd.read_csv(
+            processed_path,
+            engine=engine,
+            chunksize=chunksize,
+            **read_kwargs,
+        )
+        chunks: list[pd.DataFrame] = []
+        for chunk in reader:
+            if chunk.empty:
+                continue
+            chunk["user_id"] = chunk["user_id"].fillna("")
+            chunk["item_id"] = chunk["item_id"].fillna("")
+            chunk["review_text_processed"] = chunk["review_text_processed"].fillna("")
+            chunks.append(chunk)
+
+        if not chunks:
+            return pd.DataFrame(columns=usecols)
+        return pd.concat(chunks, ignore_index=True, copy=False)
+
+    last_exc: Exception | None = None
+    for engine, chunksize in [("c", 20000), ("python", 10000)]:
+        try:
+            return _read_chunked(engine=engine, chunksize=chunksize)
+        except (pd.errors.ParserError, MemoryError) as exc:
+            last_exc = exc
+            logging.warning(
+                "Gagal baca interactions dari %s dengan engine='%s' (chunksize=%s): %s. Coba strategi berikutnya.",
+                processed_path,
+                engine,
+                chunksize,
+                exc.__class__.__name__,
+            )
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Gagal memuat interactions dari {processed_path}")
 
 
 def train_recommenders(config: Dict) -> Dict:
@@ -299,9 +333,7 @@ def train_recommenders(config: Dict) -> Dict:
 
     run_ctx = start_run(config, "hybrid_recommender_v1") or nullcontext()
     with run_ctx:
-        interactions = _load_processed_interactions(processed_path).copy()
-        interactions["user_id"] = interactions["user_id"].astype(str)
-        interactions["item_id"] = interactions["item_id"].astype(str)
+        interactions = _load_processed_interactions(processed_path)
 
         min_user = config["recommender"]["min_user_interactions"]
         min_item = config["recommender"]["min_item_interactions"]

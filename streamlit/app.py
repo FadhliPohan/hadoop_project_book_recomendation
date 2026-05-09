@@ -295,6 +295,22 @@ def _format_size(num_bytes: int) -> str:
     return f"{num_bytes} B"
 
 
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_nested(data: Dict[str, Any], path: List[str], default: Any = None) -> Any:
+    current: Any = data
+    for key in path:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key)
+    return default if current is None else current
+
+
 def _hdfs_basename(hdfs_path: str) -> str:
     normalized = hdfs_path.strip().rstrip("/")
     if not normalized:
@@ -772,41 +788,122 @@ def tab_reports(cfg: Dict) -> None:
     st.subheader("⚖️ Perbandingan Training Mode")
     comp_data = _load_json(ML_DIR / "reports" / "training_mode_comparison.json")
     if comp_data:
+        runs = comp_data.get("runs") or {}
+        run_count = len(runs)
+        error_count = len(comp_data.get("errors") or {})
+        warning_count = len(comp_data.get("warnings") or {})
         st.caption(
             f"Status: `{comp_data.get('status', 'unknown')}` | "
-            f"Generated: {comp_data.get('generated_at_utc', '—')}"
+            f"Generated: {comp_data.get('generated_at_utc', '—')} | "
+            f"Runs: {run_count} | Errors: {error_count} | Warnings: {warning_count}"
         )
+        st.caption(
+            f"run_worker_preprocess={comp_data.get('run_worker_preprocess', False)} | "
+            f"master_ram_limit_gb={comp_data.get('master_ram_limit_gb', '—')}"
+        )
+
         run_rows = []
         for mode in ["without_worker", "with_worker"]:
-            run = (comp_data.get("runs") or {}).get(mode) or {}
+            run = runs.get(mode) or {}
             sent = run.get("sentiment_baseline_summary", {})
             rec = run.get("recommender_summary", {})
+            worker_submit = run.get("worker_preprocess_submit") or {}
             run_rows.append(
                 {
                     "Mode": mode,
                     "Status": run.get("status", "error"),
                     "Preprocess Source": run.get("preprocess_source", "—"),
-                    "Total Duration (s)": round(float(run.get("total_duration_sec", 0.0)), 2),
+                    "Worker Submit Enabled": bool(run.get("worker_preprocess_submit_enabled", False)),
+                    "Worker Submit Duration (s)": round(_as_float(worker_submit.get("duration_sec")), 3) if worker_submit else None,
+                    "Total Duration (s)": round(_as_float(run.get("total_duration_sec")), 3),
+                    "Peak Memory (MB)": round(_as_float((run.get("peak_memory_mb") or {}).get("pipeline_peak")), 3),
                     "Sentiment Best Model": sent.get("best_model", "—"),
-                    "Sentiment Test F1": round(float(sent.get("best_test_f1_weighted", 0.0)), 4),
-                    "Recommender RMSE": round(float(rec.get("rmse", 0.0)), 4),
-                    "Peak Memory (MB)": round(float((run.get("peak_memory_mb") or {}).get("pipeline_peak", 0.0)), 2),
+                    "Sentiment Val F1": round(_as_float(sent.get("best_validation_f1_weighted")), 6),
+                    "Sentiment Test F1": round(_as_float(sent.get("best_test_f1_weighted")), 6),
+                    "Sentiment Test Acc": round(_as_float(sent.get("best_test_accuracy")), 6),
+                    "Rec RMSE": round(_as_float(rec.get("rmse")), 6),
+                    "Rec MAE": round(_as_float(rec.get("mae")), 6),
+                    "Rec Precision@5": round(_as_float(rec.get("precision_at_5")), 6),
+                    "Rec Recall@5": round(_as_float(rec.get("recall_at_5")), 6),
+                    "Rec NDCG@10": round(_as_float(rec.get("ndcg_at_10")), 6),
                 }
             )
+        st.markdown("**Ringkasan KPI per Mode:**")
         st.dataframe(pd.DataFrame(run_rows), use_container_width=True, hide_index=True)
 
-        comp = comp_data.get("comparison", {})
-        if comp:
-            st.markdown("**Delta (with_worker - without_worker):**")
-            delta_rows = [
-                {"Metric": "Total Duration (s)", "Delta": round(float(comp.get("total_duration_delta_sec_with_minus_without", 0.0)), 4)},
-                {"Metric": "Sentiment Test F1", "Delta": round(float(comp.get("sentiment_test_f1_delta_with_minus_without", 0.0)), 4)},
-                {"Metric": "Sentiment Test Accuracy", "Delta": round(float(comp.get("sentiment_test_accuracy_delta_with_minus_without", 0.0)), 4)},
-                {"Metric": "Recommender RMSE", "Delta": round(float(comp.get("recommender_rmse_delta_with_minus_without", 0.0)), 4)},
-                {"Metric": "Recommender MAE", "Delta": round(float(comp.get("recommender_mae_delta_with_minus_without", 0.0)), 4)},
-                {"Metric": "Recommender NDCG@10", "Delta": round(float(comp.get("recommender_ndcg10_delta_with_minus_without", 0.0)), 4)},
+        stage_rows = []
+        for mode in ["without_worker", "with_worker"]:
+            run = runs.get(mode) or {}
+            stage_timings = run.get("timings_sec") or {}
+            stage_mem = ((run.get("peak_memory_mb") or {}).get("stages") or {})
+            for stage_name, duration in stage_timings.items():
+                stage_rows.append(
+                    {
+                        "Mode": mode,
+                        "Stage": stage_name,
+                        "Duration (s)": round(_as_float(duration), 3),
+                        "Peak Memory (MB)": round(_as_float(stage_mem.get(stage_name)), 3),
+                    }
+                )
+        if stage_rows:
+            st.markdown("**Detail Stage Timing & Peak Memory:**")
+            stage_df = pd.DataFrame(stage_rows).sort_values(["Mode", "Duration (s)"], ascending=[True, False])
+            st.dataframe(stage_df, use_container_width=True, hide_index=True)
+
+        without_run = runs.get("without_worker") or {}
+        with_run = runs.get("with_worker") or {}
+        if without_run and with_run:
+            metric_defs = [
+                ("Total Duration (s)", ["total_duration_sec"]),
+                ("Peak Memory (MB)", ["peak_memory_mb", "pipeline_peak"]),
+                ("Sentiment Test F1", ["sentiment_baseline_summary", "best_test_f1_weighted"]),
+                ("Sentiment Test Accuracy", ["sentiment_baseline_summary", "best_test_accuracy"]),
+                ("Recommender RMSE", ["recommender_summary", "rmse"]),
+                ("Recommender MAE", ["recommender_summary", "mae"]),
+                ("Recommender Precision@5", ["recommender_summary", "precision_at_5"]),
+                ("Recommender Recall@5", ["recommender_summary", "recall_at_5"]),
+                ("Recommender NDCG@10", ["recommender_summary", "ndcg_at_10"]),
             ]
+            delta_rows = []
+            for metric_name, path in metric_defs:
+                without_val = _as_float(_get_nested(without_run, path, 0.0))
+                with_val = _as_float(_get_nested(with_run, path, 0.0))
+                delta_val = with_val - without_val
+                delta_pct = (delta_val / without_val * 100.0) if without_val != 0 else None
+                delta_rows.append(
+                    {
+                        "Metric": metric_name,
+                        "without_worker": round(without_val, 6),
+                        "with_worker": round(with_val, 6),
+                        "Delta (with - without)": round(delta_val, 6),
+                        "Delta % vs without": f"{delta_pct:+.2f}%" if delta_pct is not None else "—",
+                    }
+                )
+            st.markdown("**Perbandingan Detail (with_worker - without_worker):**")
             st.dataframe(pd.DataFrame(delta_rows), use_container_width=True, hide_index=True)
+
+        with_worker_run = runs.get("with_worker") or {}
+        worker_submit = with_worker_run.get("worker_preprocess_submit") or {}
+        if worker_submit:
+            st.markdown("**Detail Worker Preprocess Submit (with_worker):**")
+            worker_rows = [
+                {"Field": "Command", "Value": worker_submit.get("cmd", "—")},
+                {"Field": "Return Code", "Value": worker_submit.get("rc", "—")},
+                {"Field": "Duration (s)", "Value": round(_as_float(worker_submit.get("duration_sec")), 3)},
+                {"Field": "Stdout Tail", "Value": (worker_submit.get("stdout_tail", "") or "—")[:1200]},
+                {"Field": "Stderr Tail", "Value": (worker_submit.get("stderr_tail", "") or "—")[:1200]},
+            ]
+            st.dataframe(pd.DataFrame(worker_rows), use_container_width=True, hide_index=True)
+
+        warnings = comp_data.get("warnings", {})
+        if warnings:
+            st.warning("Terdapat warning pada sebagian mode:")
+            for mode, detail in warnings.items():
+                with st.expander(f"Warning mode: {mode}", expanded=False):
+                    st.text(detail.get("warning", "(tanpa warning)"))
+                    if detail.get("original_error"):
+                        st.caption("Original error:")
+                        st.text(detail.get("original_error"))
 
         errors = comp_data.get("errors", {})
         if errors:
@@ -814,6 +911,9 @@ def tab_reports(cfg: Dict) -> None:
             for mode, detail in errors.items():
                 with st.expander(f"Error mode: {mode}", expanded=False):
                     st.text(detail.get("error", "(tanpa pesan error)"))
+                    if detail.get("traceback"):
+                        st.caption("Traceback:")
+                        st.code(detail.get("traceback", ""), language="text")
     else:
         st.info("Belum ada laporan komparasi. Jalankan step `compare_training_modes` dari tab Pipeline.")
 

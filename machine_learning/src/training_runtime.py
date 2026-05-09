@@ -113,6 +113,58 @@ def _current_virtual_memory_bytes() -> Optional[int]:
     return None
 
 
+def _get_process_rlimit_as() -> Optional[tuple[int, int]]:
+    try:
+        import resource
+    except Exception:
+        return None
+
+    try:
+        return resource.getrlimit(resource.RLIMIT_AS)
+    except Exception:
+        return None
+
+
+def _restore_process_rlimit_as(previous_limit: Optional[tuple[int, int]]) -> None:
+    if previous_limit is None:
+        return
+
+    try:
+        import resource
+    except Exception:
+        return
+
+    try:
+        current_limit = resource.getrlimit(resource.RLIMIT_AS)
+        if current_limit != previous_limit:
+            resource.setrlimit(resource.RLIMIT_AS, previous_limit)
+            logging.info(
+                "Batas RAM proses dipulihkan ke soft=%s hard=%s.",
+                previous_limit[0],
+                previous_limit[1],
+            )
+    except Exception as exc:
+        logging.warning("Gagal memulihkan batas RAM proses: %s", exc)
+
+
+def _build_relaxed_rlimit_preexec() -> Optional[Callable[[], None]]:
+    try:
+        import resource
+    except Exception:
+        return None
+
+    def _relax_rlimit_as() -> None:
+        try:
+            _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+            unlimited_values = {-1, resource.RLIM_INFINITY}
+            target_soft = resource.RLIM_INFINITY if hard in unlimited_values else hard
+            resource.setrlimit(resource.RLIMIT_AS, (target_soft, hard))
+        except Exception:
+            return
+
+    return _relax_rlimit_as
+
+
 def apply_master_ram_limit(config: Dict[str, Any], ram_limit_gb: Optional[float] = None) -> Optional[float]:
     limit_gb = get_master_ram_limit_gb(config, ram_limit_gb=ram_limit_gb)
     if limit_gb <= 0:
@@ -222,6 +274,7 @@ def _run_worker_preprocess_submit(config: Dict[str, Any]) -> Dict[str, Any]:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        preexec_fn=_build_relaxed_rlimit_preexec(),
     )
     stdout_lines: list[str] = []
     timeout_hit = False
@@ -347,169 +400,173 @@ def run_training_pipeline(
     ram_limit_gb: Optional[float] = None,
 ) -> Dict[str, Any]:
     source = resolve_mode_preprocess_source(training_mode)
+    original_rlimit_as = _get_process_rlimit_as()
 
-    stage_timings: Dict[str, float] = {}
-    stage_peak_memories: Dict[str, float] = {}
-    run_started = time.perf_counter()
-    run_started_at_utc = datetime.now(timezone.utc).isoformat()
+    try:
+        stage_timings: Dict[str, float] = {}
+        stage_peak_memories: Dict[str, float] = {}
+        run_started = time.perf_counter()
+        run_started_at_utc = datetime.now(timezone.utc).isoformat()
 
-    stage_sequence: list[str] = []
-    worker_stage_enabled = bool(training_mode == "with_worker" and run_worker_preprocess)
-    if worker_stage_enabled:
-        stage_sequence.append("worker_preprocess_submit")
-    stage_sequence.extend(
-        [
-            "preprocess",
-            "train_sentiment_baseline",
-            *(
-                ["train_sentiment_transformer"]
-                if include_transformer
-                else []
-            ),
-            "train_recommender",
-            "evaluate",
-        ]
-    )
-    duration_hints = _load_stage_duration_hints(config, training_mode, stage_sequence)
-    total_expected = max(sum(duration_hints.values()), 1.0)
-    completed_stages: list[str] = []
-
-    def _estimate_eta(elapsed_sec: float) -> float:
-        done_expected = sum(duration_hints.get(name, 0.0) for name in completed_stages)
-        remaining_expected = sum(
-            duration_hints.get(name, 0.0)
-            for name in stage_sequence
-            if name not in completed_stages
+        stage_sequence: list[str] = []
+        worker_stage_enabled = bool(training_mode == "with_worker" and run_worker_preprocess)
+        if worker_stage_enabled:
+            stage_sequence.append("worker_preprocess_submit")
+        stage_sequence.extend(
+            [
+                "preprocess",
+                "train_sentiment_baseline",
+                *(
+                    ["train_sentiment_transformer"]
+                    if include_transformer
+                    else []
+                ),
+                "train_recommender",
+                "evaluate",
+            ]
         )
-        if done_expected <= 0:
-            return remaining_expected
-        scale = elapsed_sec / done_expected
-        scale = max(0.5, min(scale, 4.0))
-        return remaining_expected * scale
+        duration_hints = _load_stage_duration_hints(config, training_mode, stage_sequence)
+        total_expected = max(sum(duration_hints.values()), 1.0)
+        completed_stages: list[str] = []
 
-    def _log_progress(stage_name: str, when: str) -> None:
-        elapsed_sec = time.perf_counter() - run_started
-        done_expected = sum(duration_hints.get(name, 0.0) for name in completed_stages)
-        progress_pct = min(100.0, (done_expected / total_expected) * 100.0)
-        eta_sec = _estimate_eta(elapsed_sec)
-        stage_index = stage_sequence.index(stage_name) + 1
-        stage_total = len(stage_sequence)
-        if when == "start":
-            logging.info(
-                "Progress %.1f%% | Stage %s/%s started: %s | ETA ~ %s",
-                progress_pct,
-                stage_index,
-                stage_total,
-                stage_name,
-                _format_duration(eta_sec),
+        def _estimate_eta(elapsed_sec: float) -> float:
+            done_expected = sum(duration_hints.get(name, 0.0) for name in completed_stages)
+            remaining_expected = sum(
+                duration_hints.get(name, 0.0)
+                for name in stage_sequence
+                if name not in completed_stages
             )
+            if done_expected <= 0:
+                return remaining_expected
+            scale = elapsed_sec / done_expected
+            scale = max(0.5, min(scale, 4.0))
+            return remaining_expected * scale
+
+        def _log_progress(stage_name: str, when: str) -> None:
+            elapsed_sec = time.perf_counter() - run_started
+            done_expected = sum(duration_hints.get(name, 0.0) for name in completed_stages)
+            progress_pct = min(100.0, (done_expected / total_expected) * 100.0)
+            eta_sec = _estimate_eta(elapsed_sec)
+            stage_index = stage_sequence.index(stage_name) + 1
+            stage_total = len(stage_sequence)
+            if when == "start":
+                logging.info(
+                    "Progress %.1f%% | Stage %s/%s started: %s | ETA ~ %s",
+                    progress_pct,
+                    stage_index,
+                    stage_total,
+                    stage_name,
+                    _format_duration(eta_sec),
+                )
+            else:
+                logging.info(
+                    "Progress %.1f%% | Stage %s/%s completed: %s | ETA ~ %s",
+                    progress_pct,
+                    stage_index,
+                    stage_total,
+                    stage_name,
+                    _format_duration(eta_sec),
+                )
+
+        def _run_stage(stage_name: str, runner: Callable[[], Any]) -> Any:
+            _log_progress(stage_name, when="start")
+            result = _capture_stage(
+                stage_name,
+                runner,
+                stage_timings=stage_timings,
+                stage_peak_memories=stage_peak_memories,
+            )
+            completed_stages.append(stage_name)
+            _log_progress(stage_name, when="completed")
+            return result
+
+        worker_preprocess_payload = None
+        if worker_stage_enabled:
+            worker_preprocess_payload = _run_stage(
+                "worker_preprocess_submit",
+                lambda: _run_worker_preprocess_submit(config),
+            )
+
+        applied_limit: Optional[float] = None
+        if source == "spark_hdfs":
+            logging.info(
+                "Mode spark_hdfs: menunda penerapan batas RAM master sampai stage preprocess selesai "
+                "agar bridge HDFS + pembacaan Parquet lebih stabil."
+            )
+            _run_stage(
+                "preprocess",
+                lambda: preprocess_and_split(config, source=source),
+            )
+            applied_limit = apply_master_ram_limit(config, ram_limit_gb=ram_limit_gb)
         else:
-            logging.info(
-                "Progress %.1f%% | Stage %s/%s completed: %s | ETA ~ %s",
-                progress_pct,
-                stage_index,
-                stage_total,
-                stage_name,
-                _format_duration(eta_sec),
+            applied_limit = apply_master_ram_limit(config, ram_limit_gb=ram_limit_gb)
+            _run_stage(
+                "preprocess",
+                lambda: preprocess_and_split(config, source=source),
             )
-
-    def _run_stage(stage_name: str, runner: Callable[[], Any]) -> Any:
-        _log_progress(stage_name, when="start")
-        result = _capture_stage(
-            stage_name,
-            runner,
-            stage_timings=stage_timings,
-            stage_peak_memories=stage_peak_memories,
+        sentiment_metrics = _run_stage(
+            "train_sentiment_baseline",
+            lambda: train_baseline_sentiment(config),
         )
-        completed_stages.append(stage_name)
-        _log_progress(stage_name, when="completed")
-        return result
-
-    worker_preprocess_payload = None
-    if worker_stage_enabled:
-        worker_preprocess_payload = _run_stage(
-            "worker_preprocess_submit",
-            lambda: _run_worker_preprocess_submit(config),
+        transformer_metrics = None
+        if include_transformer:
+            transformer_metrics = _run_stage(
+                "train_sentiment_transformer",
+                lambda: train_transformer_sentiment(config),
+            )
+        recommender_metrics = _run_stage(
+            "train_recommender",
+            lambda: train_recommenders(config),
         )
-
-    applied_limit: Optional[float] = None
-    if source == "spark_hdfs":
-        logging.info(
-            "Mode spark_hdfs: menunda penerapan batas RAM master sampai stage preprocess selesai "
-            "agar bridge HDFS + pembacaan Parquet lebih stabil."
+        final_report = _run_stage(
+            "evaluate",
+            lambda: compile_final_report(config),
         )
-        _run_stage(
-            "preprocess",
-            lambda: preprocess_and_split(config, source=source),
-        )
-        applied_limit = apply_master_ram_limit(config, ram_limit_gb=ram_limit_gb)
-    else:
-        applied_limit = apply_master_ram_limit(config, ram_limit_gb=ram_limit_gb)
-        _run_stage(
-            "preprocess",
-            lambda: preprocess_and_split(config, source=source),
-        )
-    sentiment_metrics = _run_stage(
-        "train_sentiment_baseline",
-        lambda: train_baseline_sentiment(config),
-    )
-    transformer_metrics = None
-    if include_transformer:
-        transformer_metrics = _run_stage(
-            "train_sentiment_transformer",
-            lambda: train_transformer_sentiment(config),
-        )
-    recommender_metrics = _run_stage(
-        "train_recommender",
-        lambda: train_recommenders(config),
-    )
-    final_report = _run_stage(
-        "evaluate",
-        lambda: compile_final_report(config),
-    )
-    logging.info("Progress 100.0%% | Pipeline training selesai.")
+        logging.info("Progress 100.0%% | Pipeline training selesai.")
 
-    total_duration = time.perf_counter() - run_started
-    payload = {
-        "status": "success",
-        "training_mode": training_mode,
-        "preprocess_source": source,
-        "run_started_at_utc": run_started_at_utc,
-        "run_finished_at_utc": datetime.now(timezone.utc).isoformat(),
-        "include_transformer": bool(include_transformer),
-        "worker_preprocess_submit_enabled": bool(run_worker_preprocess and training_mode == "with_worker"),
-        "master_ram_limit_gb": applied_limit,
-        "timings_sec": stage_timings,
-        "peak_memory_mb": {
-            "pipeline_peak": max(stage_peak_memories.values()) if stage_peak_memories else 0.0,
-            "stages": stage_peak_memories,
-        },
-        "sentiment_baseline_summary": _summarize_sentiment_metrics(sentiment_metrics),
-        "sentiment_transformer_summary": transformer_metrics or None,
-        "recommender_summary": {
-            "rmse": float(recommender_metrics.get("rmse", 0.0)),
-            "mae": float(recommender_metrics.get("mae", 0.0)),
-            "precision_at_5": float((recommender_metrics.get("precision_at_k") or {}).get("5", 0.0)),
-            "recall_at_5": float((recommender_metrics.get("recall_at_k") or {}).get("5", 0.0)),
-            "ndcg_at_10": float((recommender_metrics.get("ndcg_at_k") or {}).get("10", 0.0)),
-        },
-        "total_duration_sec": total_duration,
-        "worker_preprocess_submit": worker_preprocess_payload,
-        "artifacts": {
-            "final_report": str((resolve_path(config, "eda_dir").parent / "final_report.json")),
-            "sentiment_metrics": str(resolve_path(config, "sentiment_dir") / "metrics.json"),
-            "recommender_metrics": str(resolve_path(config, "recommender_report_json")),
-        },
-        "final_report_snapshot": final_report,
-    }
+        total_duration = time.perf_counter() - run_started
+        payload = {
+            "status": "success",
+            "training_mode": training_mode,
+            "preprocess_source": source,
+            "run_started_at_utc": run_started_at_utc,
+            "run_finished_at_utc": datetime.now(timezone.utc).isoformat(),
+            "include_transformer": bool(include_transformer),
+            "worker_preprocess_submit_enabled": bool(run_worker_preprocess and training_mode == "with_worker"),
+            "master_ram_limit_gb": applied_limit,
+            "timings_sec": stage_timings,
+            "peak_memory_mb": {
+                "pipeline_peak": max(stage_peak_memories.values()) if stage_peak_memories else 0.0,
+                "stages": stage_peak_memories,
+            },
+            "sentiment_baseline_summary": _summarize_sentiment_metrics(sentiment_metrics),
+            "sentiment_transformer_summary": transformer_metrics or None,
+            "recommender_summary": {
+                "rmse": float(recommender_metrics.get("rmse", 0.0)),
+                "mae": float(recommender_metrics.get("mae", 0.0)),
+                "precision_at_5": float((recommender_metrics.get("precision_at_k") or {}).get("5", 0.0)),
+                "recall_at_5": float((recommender_metrics.get("recall_at_k") or {}).get("5", 0.0)),
+                "ndcg_at_10": float((recommender_metrics.get("ndcg_at_k") or {}).get("10", 0.0)),
+            },
+            "total_duration_sec": total_duration,
+            "worker_preprocess_submit": worker_preprocess_payload,
+            "artifacts": {
+                "final_report": str((resolve_path(config, "eda_dir").parent / "final_report.json")),
+                "sentiment_metrics": str(resolve_path(config, "sentiment_dir") / "metrics.json"),
+                "recommender_metrics": str(resolve_path(config, "recommender_report_json")),
+            },
+            "final_report_snapshot": final_report,
+        }
 
-    experiments_dir = resolve_path(config, "training_experiments_dir")
-    ensure_dir(experiments_dir)
-    mode_report_path = experiments_dir / f"{training_mode}_latest_run.json"
-    save_json(payload, mode_report_path)
-    logging.info("Saved training pipeline run summary: %s", mode_report_path)
+        experiments_dir = resolve_path(config, "training_experiments_dir")
+        ensure_dir(experiments_dir)
+        mode_report_path = experiments_dir / f"{training_mode}_latest_run.json"
+        save_json(payload, mode_report_path)
+        logging.info("Saved training pipeline run summary: %s", mode_report_path)
 
-    return payload
+        return payload
+    finally:
+        _restore_process_rlimit_as(original_rlimit_as)
 
 
 def _build_comparison_summary(
@@ -553,24 +610,59 @@ def compare_training_modes(
         "master_ram_limit_gb": get_master_ram_limit_gb(config, ram_limit_gb=ram_limit_gb),
         "runs": {},
         "errors": {},
+        "warnings": {},
         "comparison": {},
         "status": "pending",
     }
 
     for mode in ["without_worker", "with_worker"]:
+        worker_flag = run_worker_preprocess if mode == "with_worker" else False
         try:
             run_result = run_training_pipeline(
                 config,
                 training_mode=mode,
                 include_transformer=include_transformer,
-                run_worker_preprocess=run_worker_preprocess if mode == "with_worker" else False,
+                run_worker_preprocess=worker_flag,
                 ram_limit_gb=ram_limit_gb,
             )
             report["runs"][mode] = run_result
         except Exception as exc:
+            final_exc = exc
+            final_traceback = traceback.format_exc(limit=10)
+            if mode == "with_worker" and worker_flag:
+                logging.warning(
+                    "With-worker compare gagal saat auto worker preprocess (%s). "
+                    "Retry tanpa worker preprocess submit.",
+                    exc,
+                )
+                try:
+                    run_result = run_training_pipeline(
+                        config,
+                        training_mode=mode,
+                        include_transformer=include_transformer,
+                        run_worker_preprocess=False,
+                        ram_limit_gb=ram_limit_gb,
+                    )
+                    report["runs"][mode] = run_result
+                    report["warnings"][mode] = {
+                        "warning": (
+                            "Worker preprocess submit gagal, pipeline diulang tanpa submit "
+                            "dan memakai output Spark HDFS yang sudah tersedia."
+                        ),
+                        "original_error": str(exc),
+                    }
+                    continue
+                except Exception as retry_exc:
+                    logging.exception(
+                        "Retry without worker preprocess juga gagal pada mode=%s",
+                        mode,
+                    )
+                    final_exc = retry_exc
+                    final_traceback = traceback.format_exc(limit=10)
+
             report["errors"][mode] = {
-                "error": str(exc),
-                "traceback": traceback.format_exc(limit=10),
+                "error": str(final_exc),
+                "traceback": final_traceback,
             }
             logging.exception("Compare training mode gagal pada mode=%s", mode)
 

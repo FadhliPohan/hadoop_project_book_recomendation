@@ -17,6 +17,7 @@ def compile_final_report(config: Dict) -> Dict[str, Any]:
         "sentiment_baseline": None,
         "sentiment_transformer": None,
         "recommender": None,
+        "training_mode_comparison": None,
         "model_registry": None,
     }
 
@@ -43,6 +44,13 @@ def compile_final_report(config: Dict) -> Dict[str, Any]:
         logging.info("Loaded recommender metrics: %s", rec_path)
     else:
         logging.warning("Recommender metrics not found: %s", rec_path)
+
+    comparison_path = resolve_path(config, "training_comparison_json")
+    if comparison_path.exists():
+        report["training_mode_comparison"] = load_json(comparison_path)
+        logging.info("Loaded training comparison report: %s", comparison_path)
+    else:
+        logging.warning("Training comparison report not found: %s", comparison_path)
 
     # Model registry
     registry_path = resolve_path(config, "model_registry")

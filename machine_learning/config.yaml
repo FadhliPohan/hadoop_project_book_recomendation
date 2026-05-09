@@ -15,6 +15,8 @@ paths:
   sentiment_transformer_dir: models/sentiment/transformer/distilbert_v1
   recommender_dir: models/recommender
   recommender_report_json: reports/recommender_metrics.json
+  training_experiments_dir: reports/experiments
+  training_comparison_json: reports/training_mode_comparison.json
 
 data:
   sample_rows: 120000
@@ -25,7 +27,7 @@ preprocessing:
   validation_size: 0.15
 
 sentiment:
-  tfidf_max_features: 30000
+  tfidf_max_features: 12000
   tfidf_min_df: 2
   ngram_range: [1, 2]
 
@@ -48,6 +50,11 @@ recommender:
 mlflow:
   enabled: true
   experiment_name: amazon_books_sentiment_recommender
+
+training:
+  master_ram_limit_gb: 3
+  include_transformer_by_default: false
+  auto_run_worker_preprocess: false
 
 hadoop:
   namenode_uri: hdfs://fadhli:9000

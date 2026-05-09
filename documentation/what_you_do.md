@@ -100,3 +100,28 @@ streamlit/
 documentation/
   🔧 what_you_do.md       — File ini
 ```
+
+---
+
+## 6. Update Lanjutan — 2026-05-09
+
+Perubahan tambahan untuk kebutuhan penelitian komparasi training `with_worker` vs `without_worker`:
+
+- Ditambahkan step baru di `machine_learning/main.py`:
+  - `train_pipeline`
+  - `compare_training_modes`
+- Ditambahkan mode training:
+  - `without_worker` → preprocess+training full di master
+  - `with_worker` → preprocessing awal distributed via worker (Spark/HDFS), training tetap di master
+- Ditambahkan pembatas RAM master default `3GB` via config (`training.master_ram_limit_gb`) dan enforcement runtime.
+- Ditambahkan modul baru `machine_learning/src/training_runtime.py`:
+  - orchestrator training per mode
+  - logging durasi per stage
+  - capture peak memory master
+  - export laporan:
+    - `machine_learning/reports/training_mode_comparison.json`
+    - `machine_learning/reports/experiments/without_worker_latest_run.json`
+    - `machine_learning/reports/experiments/with_worker_latest_run.json`
+- Dashboard Streamlit diperbarui:
+  - Tab Pipeline: pilih mode training + limit RAM + toggle auto spark preprocess
+  - Tab Reports/Overview: tampilkan hasil komparasi dua mode

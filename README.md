@@ -4,6 +4,7 @@ Project ini berisi pipeline machine learning untuk:
 - Sentiment analysis review buku Amazon
 - Recommender system berbasis rating, sentiment, dan konten review
 - Orkestrasi pipeline yang aman dari training otomatis tidak sengaja
+- Eksperimen komparasi training `without_worker` vs `with_worker` (worker hanya untuk preprocessing)
 
 ## Struktur Project
 
@@ -65,6 +66,15 @@ python3 machine_learning/main.py --step evaluate
 
 Training tidak akan berjalan kecuali Anda menambahkan `--allow-training`.
 
+## Mode Training Baru
+
+Pipeline sekarang mendukung dua mode:
+
+- `without_worker`: preprocess + training dilakukan di master.
+- `with_worker`: preprocessing awal dilakukan distributed via Spark/Hadoop worker, lalu training tetap di master.
+
+Untuk menjaga fairness eksperimen, batas RAM proses training master default adalah **3GB** (bisa override dengan `--ram-limit-gb`).
+
 Contoh training eksplisit:
 
 ```bash
@@ -73,6 +83,34 @@ python3 machine_learning/main.py --step train_sentiment_transformer --allow-trai
 python3 machine_learning/main.py --step train_recommender --allow-training
 ```
 
+Training pipeline single-mode:
+
+```bash
+# Full train tanpa worker
+python3 machine_learning/main.py --step train_pipeline --allow-training \
+  --training-mode without_worker --ram-limit-gb 3
+
+# Full train via worker (Spark preprocess sudah tersedia di HDFS)
+python3 machine_learning/main.py --step train_pipeline --allow-training \
+  --training-mode with_worker --ram-limit-gb 3
+
+# Jika ingin pipeline otomatis submit Spark preprocess dulu
+python3 machine_learning/main.py --step train_pipeline --allow-training \
+  --training-mode with_worker --run-worker-preprocess --ram-limit-gb 3
+```
+
+Menjalankan eksperimen komparasi dua mode sekaligus:
+
+```bash
+python3 machine_learning/main.py --step compare_training_modes --allow-training \
+  --ram-limit-gb 3
+```
+
+Output perbandingan:
+- `machine_learning/reports/training_mode_comparison.json`
+- `machine_learning/reports/experiments/without_worker_latest_run.json`
+- `machine_learning/reports/experiments/with_worker_latest_run.json`
+
 Jalankan semua step:
 
 ```bash
@@ -80,7 +118,8 @@ Jalankan semua step:
 python3 machine_learning/main.py --step all
 
 # Full termasuk training
-python3 machine_learning/main.py --step all --allow-training
+python3 machine_learning/main.py --step all --allow-training \
+  --training-mode without_worker --ram-limit-gb 3
 ```
 
 ## Menjalankan Dashboard Streamlit
@@ -97,6 +136,8 @@ python3 -m streamlit run streamlit/app.py
 
 Fitur dashboard:
 - Trigger step pipeline
+- Pilihan mode training (`without_worker` / `with_worker`)
+- Trigger komparasi dua mode training dan ringkasan delta waktu/metric
 - Trigger start/stop cluster script
 - Inference sentiment (jika model tersedia)
 - Inference rekomendasi user (jika artifact rekomendasi tersedia)

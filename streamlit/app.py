@@ -402,6 +402,7 @@ def tab_overview(cfg: Dict, ccfg: Dict) -> None:
         "🤖 Baseline Sentiment metrics.json": ML_DIR / "models" / "sentiment" / "baseline" / "metrics.json",
         "🔥 Transformer metrics.json":        ML_DIR / "models" / "sentiment" / "transformer" / "distilbert_v1" / "metrics.json",
         "📚 Recommender metrics.json":        ML_DIR / "reports" / "recommender_metrics.json",
+        "⚖️ Comparison report":               ML_DIR / "reports" / "training_mode_comparison.json",
         "📋 Model Registry":                  ML_DIR / "models" / "model_registry.json",
         "📝 Final Report":                    ML_DIR / "reports" / "final_report.json",
     }
@@ -447,6 +448,27 @@ def tab_overview(cfg: Dict, ccfg: Dict) -> None:
                       f"NDCG@10={rc.get('ndcg_at_k', {}).get('10', 0):.4f}")
     else:
         st.info("Belum ada final report. Jalankan pipeline terlebih dahulu.")
+
+    compare = _load_json(ML_DIR / "reports" / "training_mode_comparison.json")
+    if compare:
+        st.subheader("⚖️ Ringkasan Perbandingan Mode")
+        status = compare.get("status", "unknown")
+        st.caption(f"Status komparasi: `{status}` | generated_at={compare.get('generated_at_utc', '—')}")
+        comp = compare.get("comparison", {})
+        if comp:
+            c1, c2, c3 = st.columns(3)
+            c1.metric(
+                "Δ Durasi (with-without)",
+                f"{comp.get('total_duration_delta_sec_with_minus_without', 0.0):.2f} s",
+            )
+            c2.metric(
+                "Δ Sentiment F1 Test",
+                f"{comp.get('sentiment_test_f1_delta_with_minus_without', 0.0):.4f}",
+            )
+            c3.metric(
+                "Δ Recommender RMSE",
+                f"{comp.get('recommender_rmse_delta_with_minus_without', 0.0):.4f}",
+            )
 
 
 # ── TAB: EDA ─────────────────────────────────────────────────────────────────
@@ -516,6 +538,9 @@ def tab_eda(cfg: Dict) -> None:
 def tab_pipeline(cfg: Dict) -> None:
     st.subheader("🚀 Pipeline Runner")
     st.caption("Training diblokir secara default. Centang 'Izinkan Training' untuk step training.")
+    default_ram_limit = float(cfg.get("training", {}).get("master_ram_limit_gb", 3.0))
+    default_run_worker_preprocess = bool(cfg.get("training", {}).get("auto_run_worker_preprocess", False))
+    default_include_transformer = bool(cfg.get("training", {}).get("include_transformer_by_default", False))
 
     STEPS = [
         ("eda",                        "🔍 EDA",                            False),
@@ -523,6 +548,8 @@ def tab_pipeline(cfg: Dict) -> None:
         ("train_sentiment_baseline",   "🤖 Train Baseline Sentiment",       True),
         ("train_sentiment_transformer","🔥 Train Transformer (DistilBERT)", True),
         ("train_recommender",          "📚 Train Recommender System",       True),
+        ("train_pipeline",             "🏁 Train Pipeline (Single Mode)",    True),
+        ("compare_training_modes",     "⚖️ Compare: With Worker vs Without", True),
         ("evaluate",                   "📊 Evaluate (Compile Final Report)", False),
         ("all",                        "🔄 All Steps",                      False),
     ]
@@ -539,8 +566,11 @@ def tab_pipeline(cfg: Dict) -> None:
     if needs_train and not allow:
         st.warning(f"⚠️ Step `{step_key}` memerlukan flag `--allow-training`.")
 
+    preprocessing_applicable = step_key in {"eda", "preprocess", "all"}
+    training_controls_applicable = step_key in {"train_pipeline", "compare_training_modes"} or (step_key == "all" and allow)
+
     preprocess_source = "local_dataset"
-    if step_key in {"eda", "preprocess", "all"}:
+    if preprocessing_applicable:
         preprocess_source = st.selectbox(
             "Sumber Data",
             ["local_dataset", "spark_hdfs"],
@@ -561,12 +591,62 @@ def tab_pipeline(cfg: Dict) -> None:
                 "Mode ini membaca dataset mentah lokal di master dan menjalankan EDA/preprocessing dari dataset lokal."
             )
 
+    training_mode = "without_worker"
+    include_transformer = False
+    run_worker_preprocess = False
+    ram_limit_gb = default_ram_limit
+    if training_controls_applicable:
+        st.markdown("**Konfigurasi Training Mode**")
+        training_mode = st.selectbox(
+            "Training Mode",
+            ["without_worker", "with_worker"],
+            format_func=lambda v: (
+                "without_worker — preprocess + training full di master"
+                if v == "without_worker"
+                else "with_worker — preprocess awal via Spark worker, training di master"
+            ),
+        )
+        include_transformer = st.checkbox(
+            "Sertakan Transformer (DistilBERT)",
+            value=default_include_transformer,
+            help="Jika aktif, mode training pipeline juga akan melatih model transformer.",
+        )
+        run_worker_preprocess = st.checkbox(
+            "Jalankan Spark preprocess otomatis (khusus with_worker)",
+            value=default_run_worker_preprocess,
+            help=(
+                "Jika aktif, pipeline akan memanggil scripts/spark_submit_training.sh preprocess_spark "
+                "sebelum membaca hasil HDFS."
+            ),
+        )
+        ram_limit_gb = st.number_input(
+            "Batas RAM master (GB)",
+            min_value=1.0,
+            max_value=16.0,
+            value=float(default_ram_limit),
+            step=0.5,
+            help="Batas memori proses training di master. Sesuai requirement eksperimen, gunakan 3GB.",
+        )
+
+        if training_mode == "with_worker":
+            st.info(
+                "Mode with_worker: worker hanya dipakai untuk preprocessing/cleaning distributed. "
+                "Training model tetap berjalan di master."
+            )
+
     if st.button("▶️ Jalankan", type="primary", use_container_width=True):
         cmd = [_python_bin(), "machine_learning/main.py", "--step", step_key]
-        if step_key in {"eda", "preprocess", "all"}:
+        if preprocessing_applicable:
             cmd.extend(["--preprocess-source", preprocess_source])
         if allow:
             cmd.append("--allow-training")
+        if training_controls_applicable:
+            cmd.extend(["--training-mode", training_mode])
+            cmd.extend(["--ram-limit-gb", str(float(ram_limit_gb))])
+            if include_transformer:
+                cmd.append("--include-transformer")
+            if run_worker_preprocess:
+                cmd.append("--run-worker-preprocess")
         with st.spinner(f"Menjalankan: {step_label}..."):
             res = _run(cmd)
         _show_result(res)
@@ -656,6 +736,57 @@ def tab_reports(cfg: Dict) -> None:
                 st.dataframe(df_m, use_container_width=False, hide_index=True)
     else:
         st.info("Recommender belum dilatih.")
+
+    st.divider()
+
+    # ---- Worker vs Tanpa Worker ----
+    st.subheader("⚖️ Perbandingan Training Mode")
+    comp_data = _load_json(ML_DIR / "reports" / "training_mode_comparison.json")
+    if comp_data:
+        st.caption(
+            f"Status: `{comp_data.get('status', 'unknown')}` | "
+            f"Generated: {comp_data.get('generated_at_utc', '—')}"
+        )
+        run_rows = []
+        for mode in ["without_worker", "with_worker"]:
+            run = (comp_data.get("runs") or {}).get(mode) or {}
+            sent = run.get("sentiment_baseline_summary", {})
+            rec = run.get("recommender_summary", {})
+            run_rows.append(
+                {
+                    "Mode": mode,
+                    "Status": run.get("status", "error"),
+                    "Preprocess Source": run.get("preprocess_source", "—"),
+                    "Total Duration (s)": round(float(run.get("total_duration_sec", 0.0)), 2),
+                    "Sentiment Best Model": sent.get("best_model", "—"),
+                    "Sentiment Test F1": round(float(sent.get("best_test_f1_weighted", 0.0)), 4),
+                    "Recommender RMSE": round(float(rec.get("rmse", 0.0)), 4),
+                    "Peak Memory (MB)": round(float((run.get("peak_memory_mb") or {}).get("pipeline_peak", 0.0)), 2),
+                }
+            )
+        st.dataframe(pd.DataFrame(run_rows), use_container_width=True, hide_index=True)
+
+        comp = comp_data.get("comparison", {})
+        if comp:
+            st.markdown("**Delta (with_worker - without_worker):**")
+            delta_rows = [
+                {"Metric": "Total Duration (s)", "Delta": round(float(comp.get("total_duration_delta_sec_with_minus_without", 0.0)), 4)},
+                {"Metric": "Sentiment Test F1", "Delta": round(float(comp.get("sentiment_test_f1_delta_with_minus_without", 0.0)), 4)},
+                {"Metric": "Sentiment Test Accuracy", "Delta": round(float(comp.get("sentiment_test_accuracy_delta_with_minus_without", 0.0)), 4)},
+                {"Metric": "Recommender RMSE", "Delta": round(float(comp.get("recommender_rmse_delta_with_minus_without", 0.0)), 4)},
+                {"Metric": "Recommender MAE", "Delta": round(float(comp.get("recommender_mae_delta_with_minus_without", 0.0)), 4)},
+                {"Metric": "Recommender NDCG@10", "Delta": round(float(comp.get("recommender_ndcg10_delta_with_minus_without", 0.0)), 4)},
+            ]
+            st.dataframe(pd.DataFrame(delta_rows), use_container_width=True, hide_index=True)
+
+        errors = comp_data.get("errors", {})
+        if errors:
+            st.warning("Sebagian mode gagal dijalankan. Detail error:")
+            for mode, detail in errors.items():
+                with st.expander(f"Error mode: {mode}", expanded=False):
+                    st.text(detail.get("error", "(tanpa pesan error)"))
+    else:
+        st.info("Belum ada laporan komparasi. Jalankan step `compare_training_modes` dari tab Pipeline.")
 
     st.divider()
 

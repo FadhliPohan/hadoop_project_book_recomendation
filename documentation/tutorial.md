@@ -15,7 +15,7 @@ Panduan lengkap penggunaan project **Review Sentiment Analysis & Recommender Sys
    - [Tab Pipeline](#tab-pipeline)
    - [Tab Cluster](#tab-cluster)
    - [Tab Inference](#tab-inference)
-   - [Tab Status](#tab-status)
+   - [Tab Overview](#tab-overview)
 7. [Mengelola Cluster Hadoop](#7-mengelola-cluster-hadoop)
 8. [Tracking Eksperimen dengan MLflow](#8-tracking-eksperimen-dengan-mlflow)
 9. [Konfigurasi Proyek](#9-konfigurasi-proyek)
@@ -187,13 +187,47 @@ python3 machine_learning/main.py --step train_recommender --allow-training
 
 Output disimpan di: `machine_learning/models/recommender/`
 
-#### Step 6 — Evaluasi
+#### Step 6 — Training Pipeline per Mode (Rekomendasi untuk eksperimen)
+
+Mode `without_worker` (tanpa worker):
+
+```bash
+python3 machine_learning/main.py --step train_pipeline --allow-training \
+  --training-mode without_worker --ram-limit-gb 3
+```
+
+Mode `with_worker` (worker hanya preprocessing):
+
+```bash
+python3 machine_learning/main.py --step train_pipeline --allow-training \
+  --training-mode with_worker --ram-limit-gb 3
+```
+
+Jika ingin otomatis submit Spark preprocessing saat mode `with_worker`:
+
+```bash
+python3 machine_learning/main.py --step train_pipeline --allow-training \
+  --training-mode with_worker --run-worker-preprocess --ram-limit-gb 3
+```
+
+#### Step 7 — Komparasi Otomatis Dua Mode
+
+```bash
+python3 machine_learning/main.py --step compare_training_modes --allow-training \
+  --ram-limit-gb 3
+```
+
+Output:
+- `machine_learning/reports/training_mode_comparison.json`
+- `machine_learning/reports/experiments/without_worker_latest_run.json`
+- `machine_learning/reports/experiments/with_worker_latest_run.json`
+- `machine_learning/reports/final_report.json`
+
+#### Step 8 — Evaluasi (Kompilasi Report Final)
 
 ```bash
 python3 machine_learning/main.py --step evaluate
 ```
-
-Output: `machine_learning/reports/recommender_metrics.json` dan `final_report.json`
 
 ---
 
@@ -206,7 +240,8 @@ python3 machine_learning/main.py --step all
 
 **Mode penuh** (termasuk training):
 ```bash
-python3 machine_learning/main.py --step all --allow-training
+python3 machine_learning/main.py --step all --allow-training \
+  --training-mode without_worker --ram-limit-gb 3
 ```
 
 ---
@@ -257,13 +292,19 @@ Gunakan tab ini untuk menjalankan setiap step pipeline secara grafis.
 |---|---|
 | **Dropdown "Pilih step"** | Memilih step pipeline yang ingin dijalankan |
 | **Checkbox "Izinkan training"** | Mengaktifkan `--allow-training` untuk step training |
+| **Training Mode** | Memilih `without_worker` atau `with_worker` untuk step `train_pipeline` / `compare_training_modes` |
+| **Batas RAM Master (GB)** | Override batas RAM proses training di master (default 3GB) |
 | **Tombol "Jalankan Step"** | Mengeksekusi step yang dipilih |
 
 **Cara pakai:**
 1. Pilih step dari dropdown (contoh: `eda`)
 2. Jika ingin menjalankan training, centang checkbox "Izinkan training"
-3. Klik **Jalankan Step**
-4. Hasil stdout dan stderr akan muncul di bawah tombol
+3. Untuk eksperimen perbandingan, pilih:
+   - `train_pipeline` untuk satu mode
+   - `compare_training_modes` untuk dua mode sekaligus
+4. Atur `Training Mode` dan pastikan `Batas RAM Master` = `3`
+5. Klik **Jalankan Step**
+6. Hasil stdout dan stderr akan muncul di bawah tombol
 
 > ⚠️ **Peringatan:** Training diblokir secara default. Aktifkan checkbox hanya jika Anda memang bermaksud melatih model.
 
@@ -323,9 +364,9 @@ Gunakan tab ini untuk mencoba model yang sudah dilatih secara interaktif.
 
 ---
 
-### Tab Status
+### Tab Overview
 
-Tab ini menampilkan status ketersediaan artifact penting proyek.
+Tab ini menampilkan status ketersediaan artifact penting proyek + ringkasan komparasi mode jika tersedia.
 
 | Artifact | Path |
 |---|---|
@@ -333,6 +374,7 @@ Tab ini menampilkan status ketersediaan artifact penting proyek.
 | Processed train.csv | `machine_learning/data/processed/train.csv` |
 | Sentiment metrics | `machine_learning/models/sentiment/baseline/metrics.json` |
 | Recommender metrics | `machine_learning/reports/recommender_metrics.json` |
+| Comparison report | `machine_learning/reports/training_mode_comparison.json` |
 | Model registry | `machine_learning/models/model_registry.json` |
 
 Jika `final_report.json` tersedia, isinya akan ditampilkan langsung di halaman ini.
@@ -428,6 +470,14 @@ recommender:
   min_item_interactions: 3   # Minimum interaksi item
   latent_factors: 20
   top_k_values: [5, 10]      # K yang digunakan saat evaluasi
+
+training:
+  master_ram_limit_gb: 3     # Batas RAM master saat training
+  auto_run_worker_preprocess: false
+
+paths:
+  training_comparison_json: reports/training_mode_comparison.json
+  training_experiments_dir: reports/experiments
 ```
 
 Ubah nilai-nilai di atas sesuai kebutuhan sebelum menjalankan pipeline.
@@ -457,6 +507,7 @@ Hadoop_Amazon_Books_Reviews/
 │   │   ├── train_sentiment.py      ← Baseline sentiment model
 │   │   ├── train_sentiment_transformer.py  ← DistilBERT model
 │   │   ├── train_recommender.py    ← Recommender system
+│   │   ├── training_runtime.py      ← Runner training mode + komparasi
 │   │   ├── inference.py            ← Inference sentiment & rekomendasi
 │   │   ├── evaluate.py             ← Kompilasi laporan akhir
 │   │   ├── mlflow_tracker.py       ← Integrasi MLflow
@@ -469,6 +520,7 @@ Hadoop_Amazon_Books_Reviews/
 │   ├── start_cluster.sh            ← Menjalankan Hadoop cluster
 │   ├── stop_cluster.sh             ← Menghentikan Hadoop cluster
 │   ├── submit_training.sh          ← Shortcut menjalankan training
+│   ├── spark_submit_training.sh    ← Submit distributed preprocess ke YARN
 │   └── upload_to_hdfs.sh           ← Upload dataset ke HDFS
 └── streamlit/
     └── app.py                      ← Dashboard web Streamlit
@@ -544,6 +596,37 @@ Saat menjalankan `start_cluster.sh`, muncul error koneksi ke `worker1`/`worker2`
 3. Pastikan mapping IP sesuai cluster aktif:
    - `worker1` -> `192.168.0.103`
    - `worker2` -> `192.168.0.105`
+
+---
+
+### ❌ Mode `with_worker` gagal karena output HDFS belum ada
+
+Pastikan output Spark preprocessing sudah tersedia:
+
+```bash
+hdfs dfs -ls -h /user/fadhli/output/amazon_books_ml/processed
+```
+
+Jika belum ada, jalankan:
+
+```bash
+bash scripts/spark_submit_training.sh preprocess_spark
+```
+
+Lalu ulangi `train_pipeline --training-mode with_worker`.
+
+---
+
+### ❌ Training berhenti karena batas RAM 3GB
+
+Ini normal jika dataset/konfigurasi terlalu berat. Opsi:
+1. Turunkan `data.sample_rows` di `machine_learning/config.yaml`
+2. Jalankan tanpa transformer (`--include-transformer` jangan diaktifkan)
+3. Ulangi dengan RAM limit berbeda:
+   ```bash
+   python3 machine_learning/main.py --step train_pipeline --allow-training \
+     --training-mode without_worker --ram-limit-gb 4
+   ```
 
 ---
 

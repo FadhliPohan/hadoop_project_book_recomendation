@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import select
 import subprocess
 import sys
 import time
@@ -15,11 +16,20 @@ from .preprocessing import preprocess_and_split
 from .train_recommender import train_recommenders
 from .train_sentiment import train_baseline_sentiment
 from .train_sentiment_transformer import train_transformer_sentiment
-from .utils import ensure_dir, project_root, resolve_path, save_json
+from .utils import ensure_dir, load_json, project_root, resolve_path, save_json
 
 TRAINING_MODE_TO_SOURCE = {
     "without_worker": "local_dataset",
     "with_worker": "spark_hdfs",
+}
+
+DEFAULT_STAGE_DURATION_SEC = {
+    "worker_preprocess_submit": 16 * 60.0,
+    "preprocess": 18 * 60.0,
+    "train_sentiment_baseline": 10 * 60.0,
+    "train_sentiment_transformer": 22 * 60.0,
+    "train_recommender": 9 * 60.0,
+    "evaluate": 60.0,
 }
 
 
@@ -36,6 +46,37 @@ def get_master_ram_limit_gb(config: Dict[str, Any], ram_limit_gb: Optional[float
     if ram_limit_gb is not None:
         return float(ram_limit_gb)
     return float(config.get("training", {}).get("master_ram_limit_gb", 3.0))
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = int(max(0, round(seconds)))
+    mins, sec = divmod(seconds, 60)
+    hrs, mins = divmod(mins, 60)
+    if hrs > 0:
+        return f"{hrs}h {mins}m {sec}s"
+    if mins > 0:
+        return f"{mins}m {sec}s"
+    return f"{sec}s"
+
+
+def _load_stage_duration_hints(
+    config: Dict[str, Any],
+    training_mode: str,
+    stage_names: list[str],
+) -> Dict[str, float]:
+    hints = {name: DEFAULT_STAGE_DURATION_SEC.get(name, 60.0) for name in stage_names}
+
+    experiments_dir = resolve_path(config, "training_experiments_dir")
+    latest_run_path = experiments_dir / f"{training_mode}_latest_run.json"
+    previous = load_json(latest_run_path)
+    previous_timings = previous.get("timings_sec", {}) if isinstance(previous, dict) else {}
+
+    if isinstance(previous_timings, dict):
+        for name in stage_names:
+            value = previous_timings.get(name)
+            if isinstance(value, (int, float)) and value > 0:
+                hints[name] = float(value)
+    return hints
 
 
 def _peak_memory_mb() -> float:
@@ -128,34 +169,88 @@ def _run_worker_preprocess_submit(config: Dict[str, Any]) -> Dict[str, Any]:
 
     timeout_sec = int(spark_cfg.get("submit_timeout_sec", 1800))
     started_at = time.perf_counter()
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         cwd=str(repo_root),
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        timeout=timeout_sec,
+        bufsize=1,
     )
+    stdout_lines: list[str] = []
+    timeout_hit = False
+    last_heartbeat = started_at
+
+    assert proc.stdout is not None
+    while True:
+        now = time.perf_counter()
+        if timeout_sec > 0 and (now - started_at) > timeout_sec:
+            timeout_hit = True
+            proc.kill()
+            break
+
+        ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+        if ready:
+            line = proc.stdout.readline()
+            if line:
+                stdout_lines.append(line)
+                stripped = line.rstrip()
+                if stripped:
+                    logging.info("[worker_preprocess] %s", stripped)
+
+        if now - last_heartbeat >= 30.0:
+            logging.info(
+                "Worker preprocess masih berjalan... elapsed %s",
+                _format_duration(now - started_at),
+            )
+            last_heartbeat = now
+
+        if proc.poll() is not None:
+            break
+
+    remaining_stdout = proc.stdout.read() or ""
+    if remaining_stdout:
+        stdout_lines.append(remaining_stdout)
+        for line in remaining_stdout.splitlines():
+            if line.strip():
+                logging.info("[worker_preprocess] %s", line)
+
+    return_code = proc.wait()
     duration_sec = time.perf_counter() - started_at
+    stdout_text = "".join(stdout_lines)
+    if timeout_hit:
+        raise RuntimeError(
+            "Spark worker preprocessing timeout.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"Timeout: {timeout_sec} detik\n"
+            f"Stdout (tail): {stdout_text[-4000:]}"
+        )
 
     payload = {
         "cmd": " ".join(cmd),
         "duration_sec": duration_sec,
-        "rc": int(proc.returncode),
-        "stdout_tail": proc.stdout[-4000:],
-        "stderr_tail": proc.stderr[-4000:],
+        "rc": int(return_code),
+        "stdout_tail": stdout_text[-4000:],
+        "stderr_tail": "",
     }
 
-    if proc.returncode != 0:
+    if return_code != 0:
         raise RuntimeError(
             "Spark worker preprocessing gagal.\n"
             f"Command: {payload['cmd']}\n"
-            f"Exit code: {proc.returncode}\n"
+            f"Exit code: {return_code}\n"
+            f"Stdout (tail): {payload['stdout_tail']}\n"
             f"Stderr (tail): {payload['stderr_tail']}"
         )
 
     logging.info("Spark worker preprocessing selesai dalam %.2f detik", duration_sec)
     return payload
+
+
+def run_worker_preprocess_submit(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Public wrapper untuk submit preprocessing Spark sebelum stage lain membaca output HDFS."""
+    return _run_worker_preprocess_submit(config)
 
 
 def _summarize_sentiment_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -206,7 +301,6 @@ def run_training_pipeline(
     run_worker_preprocess: bool = False,
     ram_limit_gb: Optional[float] = None,
 ) -> Dict[str, Any]:
-    applied_limit = apply_master_ram_limit(config, ram_limit_gb=ram_limit_gb)
     source = resolve_mode_preprocess_source(training_mode)
 
     stage_timings: Dict[str, float] = {}
@@ -214,47 +308,110 @@ def run_training_pipeline(
     run_started = time.perf_counter()
     run_started_at_utc = datetime.now(timezone.utc).isoformat()
 
-    worker_preprocess_payload = None
-    if training_mode == "with_worker" and run_worker_preprocess:
-        worker_preprocess_payload = _capture_stage(
-            "worker_preprocess_submit",
-            lambda: _run_worker_preprocess_submit(config),
+    stage_sequence: list[str] = []
+    worker_stage_enabled = bool(training_mode == "with_worker" and run_worker_preprocess)
+    if worker_stage_enabled:
+        stage_sequence.append("worker_preprocess_submit")
+    stage_sequence.extend(
+        [
+            "preprocess",
+            "train_sentiment_baseline",
+            *(
+                ["train_sentiment_transformer"]
+                if include_transformer
+                else []
+            ),
+            "train_recommender",
+            "evaluate",
+        ]
+    )
+    duration_hints = _load_stage_duration_hints(config, training_mode, stage_sequence)
+    total_expected = max(sum(duration_hints.values()), 1.0)
+    completed_stages: list[str] = []
+
+    def _estimate_eta(elapsed_sec: float) -> float:
+        done_expected = sum(duration_hints.get(name, 0.0) for name in completed_stages)
+        remaining_expected = sum(
+            duration_hints.get(name, 0.0)
+            for name in stage_sequence
+            if name not in completed_stages
+        )
+        if done_expected <= 0:
+            return remaining_expected
+        scale = elapsed_sec / done_expected
+        scale = max(0.5, min(scale, 4.0))
+        return remaining_expected * scale
+
+    def _log_progress(stage_name: str, when: str) -> None:
+        elapsed_sec = time.perf_counter() - run_started
+        done_expected = sum(duration_hints.get(name, 0.0) for name in completed_stages)
+        progress_pct = min(100.0, (done_expected / total_expected) * 100.0)
+        eta_sec = _estimate_eta(elapsed_sec)
+        stage_index = stage_sequence.index(stage_name) + 1
+        stage_total = len(stage_sequence)
+        if when == "start":
+            logging.info(
+                "Progress %.1f%% | Stage %s/%s started: %s | ETA ~ %s",
+                progress_pct,
+                stage_index,
+                stage_total,
+                stage_name,
+                _format_duration(eta_sec),
+            )
+        else:
+            logging.info(
+                "Progress %.1f%% | Stage %s/%s completed: %s | ETA ~ %s",
+                progress_pct,
+                stage_index,
+                stage_total,
+                stage_name,
+                _format_duration(eta_sec),
+            )
+
+    def _run_stage(stage_name: str, runner: Callable[[], Any]) -> Any:
+        _log_progress(stage_name, when="start")
+        result = _capture_stage(
+            stage_name,
+            runner,
             stage_timings=stage_timings,
             stage_peak_memories=stage_peak_memories,
         )
+        completed_stages.append(stage_name)
+        _log_progress(stage_name, when="completed")
+        return result
 
-    _capture_stage(
+    worker_preprocess_payload = None
+    if worker_stage_enabled:
+        worker_preprocess_payload = _run_stage(
+            "worker_preprocess_submit",
+            lambda: _run_worker_preprocess_submit(config),
+        )
+
+    applied_limit = apply_master_ram_limit(config, ram_limit_gb=ram_limit_gb)
+
+    _run_stage(
         "preprocess",
         lambda: preprocess_and_split(config, source=source),
-        stage_timings=stage_timings,
-        stage_peak_memories=stage_peak_memories,
     )
-    sentiment_metrics = _capture_stage(
+    sentiment_metrics = _run_stage(
         "train_sentiment_baseline",
         lambda: train_baseline_sentiment(config),
-        stage_timings=stage_timings,
-        stage_peak_memories=stage_peak_memories,
     )
     transformer_metrics = None
     if include_transformer:
-        transformer_metrics = _capture_stage(
+        transformer_metrics = _run_stage(
             "train_sentiment_transformer",
             lambda: train_transformer_sentiment(config),
-            stage_timings=stage_timings,
-            stage_peak_memories=stage_peak_memories,
         )
-    recommender_metrics = _capture_stage(
+    recommender_metrics = _run_stage(
         "train_recommender",
         lambda: train_recommenders(config),
-        stage_timings=stage_timings,
-        stage_peak_memories=stage_peak_memories,
     )
-    final_report = _capture_stage(
+    final_report = _run_stage(
         "evaluate",
         lambda: compile_final_report(config),
-        stage_timings=stage_timings,
-        stage_peak_memories=stage_peak_memories,
     )
+    logging.info("Progress 100.0%% | Pipeline training selesai.")
 
     total_duration = time.perf_counter() - run_started
     payload = {

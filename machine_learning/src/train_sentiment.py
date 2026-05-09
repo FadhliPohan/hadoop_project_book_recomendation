@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import gc
 import json
 import logging
 from datetime import datetime, timezone
@@ -30,6 +31,81 @@ from .mlflow_tracker import log_artifact, log_metrics, log_params, start_run
 from .utils import append_model_registry, ensure_dir, resolve_path
 
 LABEL_ORDER = [0, 1, 2]
+
+
+def _resolve_dtype(dtype_name: str) -> np.dtype:
+    lowered = str(dtype_name).strip().lower()
+    if lowered == "float32":
+        return np.float32
+    if lowered == "float64":
+        return np.float64
+    raise ValueError(f"Unsupported TF-IDF dtype: {dtype_name}")
+
+
+def _build_tfidf_profiles(config: Dict) -> list[Dict]:
+    sentiment_cfg = config.get("sentiment", {})
+    dtype = _resolve_dtype(sentiment_cfg.get("tfidf_dtype", "float32"))
+    max_features = int(sentiment_cfg["tfidf_max_features"])
+    min_df = int(sentiment_cfg["tfidf_min_df"])
+    ngram_range = tuple(sentiment_cfg["ngram_range"])
+    max_df = float(sentiment_cfg.get("tfidf_max_df", 0.95))
+    lower_memory = bool(sentiment_cfg.get("enable_memory_fallback", True))
+
+    profiles: list[Dict] = [
+        {
+            "name": "primary",
+            "max_features": max_features,
+            "min_df": min_df,
+            "ngram_range": ngram_range,
+            "dtype": dtype,
+            "max_df": max_df,
+        }
+    ]
+
+    if not lower_memory:
+        return profiles
+
+    fallback_candidates = [
+        {
+            "name": "fallback_1",
+            "max_features": min(max_features, 8000),
+            "min_df": max(min_df, 3),
+            "ngram_range": (1, 1),
+            "dtype": np.float32,
+            "max_df": max_df,
+        },
+        {
+            "name": "fallback_2",
+            "max_features": min(max_features, 5000),
+            "min_df": max(min_df, 5),
+            "ngram_range": (1, 1),
+            "dtype": np.float32,
+            "max_df": max_df,
+        },
+    ]
+
+    seen_keys = {
+        (
+            profiles[0]["max_features"],
+            profiles[0]["min_df"],
+            profiles[0]["ngram_range"],
+            profiles[0]["dtype"],
+            profiles[0]["max_df"],
+        )
+    }
+    for candidate in fallback_candidates:
+        key = (
+            candidate["max_features"],
+            candidate["min_df"],
+            candidate["ngram_range"],
+            candidate["dtype"],
+            candidate["max_df"],
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        profiles.append(candidate)
+    return profiles
 
 
 def _load_splits(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -73,15 +149,13 @@ def train_baseline_sentiment(config: Dict) -> Dict:
     x_test = test_df["review_text_processed"].fillna("")
     y_test = test_df["sentiment_label"].astype(int)
 
-    tfidf_max_features = config["sentiment"]["tfidf_max_features"]
-    tfidf_min_df = config["sentiment"]["tfidf_min_df"]
-    ngram_range = tuple(config["sentiment"]["ngram_range"])
+    tfidf_profiles = _build_tfidf_profiles(config)
     random_state = config["project"]["random_state"]
 
     models = {
         "tfidf_logreg_v1": LogisticRegression(max_iter=300, class_weight="balanced", random_state=random_state),
         "tfidf_nb_v1": MultinomialNB(),
-        "tfidf_svm_v1": LinearSVC(class_weight="balanced", random_state=random_state),
+        "tfidf_svm_v1": LinearSVC(class_weight="balanced", random_state=random_state, dual=False),
     }
 
     all_metrics: Dict[str, Dict] = {}
@@ -92,21 +166,63 @@ def train_baseline_sentiment(config: Dict) -> Dict:
         run_ctx = start_run(config, model_name) or nullcontext()
         with run_ctx:
             logging.info("Training baseline model: %s", model_name)
-            pipeline = Pipeline(
-                steps=[
-                    (
-                        "tfidf",
-                        TfidfVectorizer(
-                            max_features=tfidf_max_features,
-                            min_df=tfidf_min_df,
-                            ngram_range=ngram_range,
+            pipeline = None
+            active_profile = None
+            last_error: Exception | None = None
+            for profile in tfidf_profiles:
+                logging.info(
+                    "Trying TF-IDF profile '%s' for %s (max_features=%s, min_df=%s, ngram=%s, dtype=%s, max_df=%.3f)",
+                    profile["name"],
+                    model_name,
+                    profile["max_features"],
+                    profile["min_df"],
+                    profile["ngram_range"],
+                    np.dtype(profile["dtype"]).name,
+                    profile["max_df"],
+                )
+                candidate = Pipeline(
+                    steps=[
+                        (
+                            "tfidf",
+                            TfidfVectorizer(
+                                max_features=profile["max_features"],
+                                min_df=profile["min_df"],
+                                ngram_range=profile["ngram_range"],
+                                dtype=profile["dtype"],
+                                max_df=profile["max_df"],
+                            ),
                         ),
-                    ),
-                    ("classifier", estimator),
-                ]
-            )
+                        ("classifier", estimator),
+                    ]
+                )
+                try:
+                    candidate.fit(x_train, y_train)
+                    pipeline = candidate
+                    active_profile = profile
+                    break
+                except Exception as err:
+                    is_memory_error = isinstance(err, MemoryError) or (
+                        isinstance(err, ValueError)
+                        and (
+                            "unable to allocate" in str(err).lower()
+                            or "array is too big" in str(err).lower()
+                        )
+                    )
+                    if not is_memory_error:
+                        raise
+                    last_error = err
+                    del candidate
+                    gc.collect()
+                    logging.warning(
+                        "Memory error while fitting %s with TF-IDF profile '%s'. Trying a lighter profile.",
+                        model_name,
+                        profile["name"],
+                    )
 
-            pipeline.fit(x_train, y_train)
+            if pipeline is None or active_profile is None:
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError(f"Training failed for {model_name}: no TF-IDF profile could be fitted.")
 
             val_pred = pipeline.predict(x_val)
             test_pred = pipeline.predict(x_test)
@@ -149,9 +265,12 @@ def train_baseline_sentiment(config: Dict) -> Dict:
                     "version": "v1",
                     "path": str(model_path),
                     "hyperparameters": {
-                        "tfidf_max_features": tfidf_max_features,
-                        "tfidf_min_df": tfidf_min_df,
-                        "ngram_range": ngram_range,
+                        "tfidf_profile": active_profile["name"],
+                        "tfidf_max_features": active_profile["max_features"],
+                        "tfidf_min_df": active_profile["min_df"],
+                        "ngram_range": active_profile["ngram_range"],
+                        "tfidf_dtype": np.dtype(active_profile["dtype"]).name,
+                        "tfidf_max_df": active_profile["max_df"],
                     },
                 },
             )
@@ -160,9 +279,12 @@ def train_baseline_sentiment(config: Dict) -> Dict:
                 config,
                 {
                     "model_name": model_name,
-                    "tfidf_max_features": tfidf_max_features,
-                    "tfidf_min_df": tfidf_min_df,
-                    "ngram_range": ngram_range,
+                    "tfidf_profile": active_profile["name"],
+                    "tfidf_max_features": active_profile["max_features"],
+                    "tfidf_min_df": active_profile["min_df"],
+                    "ngram_range": active_profile["ngram_range"],
+                    "tfidf_dtype": np.dtype(active_profile["dtype"]).name,
+                    "tfidf_max_df": active_profile["max_df"],
                 },
             )
             log_metrics(
@@ -182,6 +304,7 @@ def train_baseline_sentiment(config: Dict) -> Dict:
             log_artifact(config, cm_test_path, artifact_path=f"sentiment_baseline/{model_name}")
             log_artifact(config, cm_val_path, artifact_path=f"sentiment_baseline/{model_name}")
             log_artifact(config, report_txt_path, artifact_path=f"sentiment_baseline/{model_name}")
+            gc.collect()
 
     summary = {
         "best_model": best_model_name,

@@ -30,6 +30,9 @@ sentiment:
   tfidf_max_features: 12000
   tfidf_min_df: 2
   ngram_range: [1, 2]
+  tfidf_max_df: 0.95
+  tfidf_dtype: float32
+  enable_memory_fallback: true
 
 transformer:
   model_name: distilbert-base-uncased

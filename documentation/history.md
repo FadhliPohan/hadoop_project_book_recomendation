@@ -80,3 +80,19 @@
   - `hdfs dfs -ls -h /user/fadhli/output/amazon_books_ml`
 - bila perlu generate output preprocess:
   - `bash scripts/spark_submit_training.sh preprocess_spark`
+
+### Update Tambahan (Fix Timeout Streamlit Pipeline)
+
+1. Timeout pipeline di dashboard diperbaiki:
+- tab `Pipeline` sekarang punya opsi:
+  - `Tanpa timeout (recommended untuk training panjang)`
+  - `Timeout Pipeline (detik)` yang bisa diatur manual
+- default timeout dibuat panjang (`10800` detik) saat timeout aktif.
+
+2. Live terminal training di Streamlit diaktifkan:
+- eksekusi di tab `Pipeline` sekarang pakai runner live (`_run_live`), bukan blocking `subprocess.run`.
+- stdout/stderr proses training tampil real-time selama command berjalan.
+
+3. Dampak:
+- kasus `❌ Gagal karena timeout` saat training panjang dapat dihindari dengan menyalakan mode tanpa timeout.
+- progres training bisa dipantau langsung dari dashboard tanpa buka terminal terpisah.

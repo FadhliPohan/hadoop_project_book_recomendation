@@ -8,6 +8,7 @@ from src.training_runtime import (
     apply_master_ram_limit,
     compare_training_modes,
     resolve_mode_preprocess_source,
+    run_worker_preprocess_submit,
     run_training_pipeline,
 )
 
@@ -100,7 +101,12 @@ def main() -> None:
             "Gunakan --allow-training jika memang ingin training."
         )
 
-    if args.step in TRAINING_STEPS or (args.step == "all" and args.allow_training):
+    training_steps_with_direct_local_train = {
+        "train_sentiment_baseline",
+        "train_sentiment_transformer",
+        "train_recommender",
+    }
+    if args.step in training_steps_with_direct_local_train:
         apply_master_ram_limit(config, ram_limit_gb=args.ram_limit_gb)
 
     if args.step == "eda":
@@ -162,19 +168,35 @@ def main() -> None:
         from src.eda import run_eda
 
         source = args.preprocess_source
+        run_worker_preprocess_for_pipeline = args.run_worker_preprocess
+        if args.allow_training:
+            logging.info("Progress ALL: 0%% | Mulai pipeline all (training enabled).")
         if args.allow_training:
             source = resolve_mode_preprocess_source(args.training_mode)
+            if args.training_mode == "with_worker" and args.run_worker_preprocess:
+                logging.info(
+                    "Running Spark worker preprocess before EDA "
+                    "because source=spark_hdfs and --run-worker-preprocess aktif."
+                )
+                run_worker_preprocess_submit(config)
+                run_worker_preprocess_for_pipeline = False
+                logging.info("Progress ALL: 25%% | Worker preprocess selesai.")
 
         # Default mode aman: no-training. Cocok untuk iterasi coding.
+        if args.allow_training:
+            logging.info("Progress ALL: 30%% | Mulai EDA.")
         run_eda(config, source=source)
+        if args.allow_training:
+            logging.info("Progress ALL: 45%% | EDA selesai. Lanjut training pipeline.")
         if args.allow_training:
             run_training_pipeline(
                 config,
                 training_mode=args.training_mode,
                 include_transformer=args.include_transformer,
-                run_worker_preprocess=args.run_worker_preprocess,
+                run_worker_preprocess=run_worker_preprocess_for_pipeline,
                 ram_limit_gb=args.ram_limit_gb,
             )
+            logging.info("Progress ALL: 100%% | Pipeline all selesai.")
             logging.info("Pipeline all selesai dengan mode training=%s", args.training_mode)
             return
 

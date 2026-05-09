@@ -634,6 +634,30 @@ def tab_pipeline(cfg: Dict) -> None:
                 "Training model tetap berjalan di master."
             )
 
+    st.markdown("**Konfigurasi Eksekusi**")
+    default_timeout_sec = int(cfg.get("streamlit", {}).get("pipeline_timeout_sec", 10800))
+    no_timeout_default = bool(step_key in {"all", "train_pipeline", "compare_training_modes"} and allow)
+    col_exec_1, col_exec_2 = st.columns([2, 2])
+    with col_exec_1:
+        disable_timeout = st.checkbox(
+            "Tanpa timeout (recommended untuk training panjang)",
+            value=no_timeout_default,
+        )
+    with col_exec_2:
+        pipeline_timeout = st.number_input(
+            "Timeout Pipeline (detik)",
+            min_value=60,
+            max_value=86400,
+            step=60,
+            value=default_timeout_sec,
+            disabled=disable_timeout,
+            help="Batas tunggu di dashboard. Nonaktifkan timeout untuk training yang lama.",
+        )
+
+    st.caption(
+        "Output terminal proses akan tampil live di bawah saat command berjalan (stdout & stderr)."
+    )
+
     if st.button("▶️ Jalankan", type="primary", use_container_width=True):
         cmd = [_python_bin(), "machine_learning/main.py", "--step", step_key]
         if preprocessing_applicable:
@@ -647,8 +671,13 @@ def tab_pipeline(cfg: Dict) -> None:
                 cmd.append("--include-transformer")
             if run_worker_preprocess:
                 cmd.append("--run-worker-preprocess")
-        with st.spinner(f"Menjalankan: {step_label}..."):
-            res = _run(cmd)
+        effective_timeout = 0 if disable_timeout else int(pipeline_timeout)
+        res = _run_live(
+            cmd,
+            timeout=effective_timeout,
+            title=f"Menjalankan: {step_label}",
+            max_visible_lines=500,
+        )
         _show_result(res)
 
 

@@ -1,127 +1,93 @@
-# Apa yang Telah Dilakukan (what_you_do.md)
+# Apa yang Telah Dilakukan
 
-Tanggal: 2026-05-02
+Tanggal update: 2026-05-09
 
----
+## 1. Pembaruan Arsitektur Pipeline
 
-## 1. Code Review & Bug Fix — `machine_learning/src/`
+1. Menambahkan mode training eksplisit:
+- `without_worker`
+- `with_worker`
 
-### Bug Kritis yang Diperbaiki
+2. Menambahkan step pipeline baru:
+- `train_pipeline`
+- `compare_training_modes`
 
-| File | Masalah | Solusi |
-|---|---|---|
-| `src/evaluate.py` | **Tidak ada** — dipanggil `main.py --step evaluate` tapi file belum dibuat | File dibuat baru |
-| `src/inference.py` | **Tidak ada** — diimport di `streamlit/app.py` → dashboard crash saat startup | File dibuat baru |
-| `scripts/upload_to_hdfs.sh` | File **kosong**, belum ada implementasi | Diimplementasi penuh |
-| `train_recommender.py` L163 | `groupby("item_id", as_index=False).apply()` — pandas ≥2.0 tidak lagi otomatis rename kolom | Ganti ke `.groupby().apply().reset_index().rename()` |
-| `train_sentiment_transformer.py` L164 | `tokenizer=tokenizer` di `Trainer` deprecated di transformers ≥4.40 | Ditambahkan shim kompatibilitas menggunakan `inspect.signature` |
-| `preprocessing.py` L50 | `set[str]` type hint tidak valid di Python < 3.9 | Diganti ke `Set[str]` dari `typing` |
+3. Menambahkan orchestrator runtime baru di `machine_learning/src/training_runtime.py` untuk:
+- progress stage,
+- timing per stage,
+- peak memory per stage,
+- report per mode,
+- report komparasi dua mode.
 
-### File Baru yang Dibuat
+## 2. Hardening Stabilitas Runtime
 
-- **`machine_learning/src/evaluate.py`** — Mengkompilasi `final_report.json` dari semua metrik baseline, transformer, dan recommender yang tersedia.
-- **`machine_learning/src/inference.py`** — Dua fungsi: `predict_sentiment(config, text)` menggunakan model baseline terbaik dari registry, `recommend_for_user(config, user_id, top_n)` membaca dari hybrid_recommendations.csv.
-- **`machine_learning/src/spark_preprocess.py`** — Script PySpark distributed preprocessing yang membaca dataset dari HDFS dan menyimpan hasil Parquet kembali ke HDFS. Berjalan di YARN, worker node membantu proses komputasi.
+1. Proteksi memory master:
+- `apply_master_ram_limit` (default 3GB dari config).
 
----
+2. Fallback pembacaan data besar:
+- `train_sentiment._read_split_csv` fallback parser C -> python engine.
+- `train_recommender._load_processed_interactions` memakai pembacaan chunked + fallback engine.
 
-## 2. Infrastruktur Hadoop & Spark
+3. Bridge HDFS yang lebih stabil:
+- cache persisten,
+- progress logging,
+- warning saat throughput lambat.
 
-### File Baru
+## 3. Integrasi Jalur Worker
 
-- **`config/cluster.yaml`** — Konfigurasi terpusat: hostname worker, SSH user, HDFS path, YARN port, Spark resource (num-executors, executor-memory, dll).
-- **`scripts/upload_to_hdfs.sh`** — Upload semua CSV dari `machine_learning/dataset/` ke HDFS target path. Termasuk validasi apakah `hdfs` command tersedia.
-- **`scripts/spark_submit_training.sh`** — Wrapper spark-submit ke YARN dengan parameter: step, num-executors, executor-cores, executor-memory, driver-memory.
+1. Spark preprocessing distributed ditangani `spark_preprocess.py`.
+2. Wrapper submit `scripts/spark_submit_training.sh` ditingkatkan dengan:
+- preflight YARN,
+- warning hostname loopback,
+- parameter env preprocess.
+3. Runtime compare `with_worker` punya retry otomatis jika auto submit preprocess gagal.
 
-### Konfigurasi Ditambahkan
+## 4. Pembaruan Dashboard Streamlit
 
-- **`machine_learning/config.yaml`** — Ditambah section `hadoop` (namenode URI, HDFS paths, UI ports) dan `spark` (master, deploy-mode, resource defaults).
+1. Tab `Pipeline` mendukung:
+- mode training,
+- include transformer,
+- auto worker preprocess,
+- RAM limit,
+- live stdout/stderr,
+- kontrol timeout.
 
----
+2. Tab `Reports` menampilkan:
+- KPI per mode,
+- detail stage timing dan peak memory,
+- tabel delta metrik `with_worker - without_worker`,
+- warning/error komparasi.
 
-## 3. Streamlit Dashboard — Full Rebuild
+3. Tab `Cluster` mendukung:
+- start/stop cluster,
+- spark submit,
+- upload/download HDFS,
+- reset training state,
+- permission dan network helper.
 
-`streamlit/app.py` di-rebuild total dengan **6 tab**:
+## 5. Pembaruan Dokumentasi Menyeluruh
 
-| Tab | Fitur |
-|---|---|
-| 🏠 **Overview** | Status artifact (ada/tidak + ukuran), quick metrics dari final_report.json |
-| 📊 **EDA** | Grafik distribusi rating & panjang review (PNG), tabel statistik, contoh review per sentimen |
-| 🚀 **Pipeline** | Dropdown step, toggle allow-training, jalankan pipeline dengan output stdout/stderr |
-| 📈 **Reports** | Tabel metrik semua baseline model, confusion matrix images, metrik recommender (RMSE, MAE, Precision@K, NDCG@K), model registry |
-| 🔮 **Inference** | Sentiment inference (teks → label + confidence + probabilitas), recommender inference (user_id → top-N books) |
-| 🖥️ **Cluster** | SSH status check ke worker1 & worker2, link ke HDFS UI & YARN UI, Start/Stop cluster, upload HDFS, Spark Submit launcher dengan konfigurasi resource, browse HDFS path |
+Semua dokumentasi sudah disinkronkan ulang ke kondisi kode terbaru:
 
----
+- `README.md`
+- `documentation/arsitecture_plant.md`
+- `documentation/tutorial.md`
+- `documentation/QNA.md`
+- `documentation/structure.md`
+- `documentation/history.md`
+- `documentation/what_i_have.md`
+- `documentation/what_you_do.md`
+- `machine_learning/documentation/plant.md`
+- `machine_learning/documentation/report_progres.md`
+- `machine_learning/notebooks/README.md`
 
-## 4. Catatan Arsitektur
+Poin terpenting:
+- `documentation/structure.md` sekarang berisi pemetaan semua file kode dan fungsi per file.
 
-- Training ML (baseline, transformer, recommender) tetap berjalan di **master node** menggunakan scikit-learn.
-- **Worker node** berperan aktif dalam `preprocess_spark` menggunakan PySpark + YARN:
-  - worker membaca block HDFS secara paralel
-  - cleaning dan labeling distributed di executor
-  - hasil disimpan ke HDFS sebagai Parquet
-- Untuk training distributed penuh, perlu migrasi ke **PySpark MLlib** (rencana pengembangan selanjutnya).
+## 6. Kondisi Saat Ini
 
----
-
-## 5. Status File
-
-```
-machine_learning/src/
-  ✅ data_loader.py       — Tidak diubah (sudah benar)
-  ✅ eda.py               — Tidak diubah (sudah benar)
-  ✅ preprocessing.py     — Fix type hint Python 3.8
-  ✅ train_sentiment.py   — Tidak diubah (sudah benar)
-  ✅ train_recommender.py — Fix pandas ≥2.0 bug
-  ✅ train_sentiment_transformer.py — Fix deprecated tokenizer param
-  ✅ mlflow_tracker.py    — Tidak diubah (sudah benar)
-  ✅ utils.py             — Tidak diubah (sudah benar)
-  🆕 evaluate.py          — BARU
-  🆕 inference.py         — BARU
-  🆕 spark_preprocess.py  — BARU
-
-scripts/
-  ✅ start_cluster.sh     — Tidak diubah
-  ✅ stop_cluster.sh      — Tidak diubah
-  ✅ submit_training.sh   — Tidak diubah
-  🔧 upload_to_hdfs.sh   — Diimplementasi (sebelumnya kosong)
-  🆕 spark_submit_training.sh — BARU
-
-config/
-  🆕 cluster.yaml         — BARU
-
-machine_learning/
-  🔧 config.yaml          — Ditambah section hadoop & spark
-
-streamlit/
-  🔧 app.py               — Rebuild total (6 tab)
-
-documentation/
-  🔧 what_you_do.md       — File ini
-```
-
----
-
-## 6. Update Lanjutan — 2026-05-09
-
-Perubahan tambahan untuk kebutuhan penelitian komparasi training `with_worker` vs `without_worker`:
-
-- Ditambahkan step baru di `machine_learning/main.py`:
-  - `train_pipeline`
-  - `compare_training_modes`
-- Ditambahkan mode training:
-  - `without_worker` → preprocess+training full di master
-  - `with_worker` → preprocessing awal distributed via worker (Spark/HDFS), training tetap di master
-- Ditambahkan pembatas RAM master default `3GB` via config (`training.master_ram_limit_gb`) dan enforcement runtime.
-- Ditambahkan modul baru `machine_learning/src/training_runtime.py`:
-  - orchestrator training per mode
-  - logging durasi per stage
-  - capture peak memory master
-  - export laporan:
-    - `machine_learning/reports/training_mode_comparison.json`
-    - `machine_learning/reports/experiments/without_worker_latest_run.json`
-    - `machine_learning/reports/experiments/with_worker_latest_run.json`
-- Dashboard Streamlit diperbarui:
-  - Tab Pipeline: pilih mode training + limit RAM + toggle auto spark preprocess
-  - Tab Reports/Overview: tampilkan hasil komparasi dua mode
+1. Project siap dipakai untuk eksperimen komparasi training mode.
+2. Arsitektur masih hybrid:
+- worker untuk preprocessing,
+- training model final tetap di master.
+3. Fondasi dokumentasi kini konsisten dengan implementasi aktual.

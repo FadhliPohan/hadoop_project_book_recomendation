@@ -1,617 +1,145 @@
-# Architecture Plan: Hadoop Cluster untuk Training Machine Learning dan Visualisasi Streamlit
+# Architecture Plan (As-Is) Hadoop Amazon Books Reviews
 
-## 1. Tujuan
+Dokumen ini menjelaskan arsitektur aktual project berdasarkan implementasi kode saat ini, bukan rencana konseptual lama.
 
-Dokumen ini berisi rencana arsitektur untuk membangun cluster Hadoop yang dapat digunakan untuk:
+Tanggal pembaruan: 2026-05-09.
 
-- Menyimpan dataset besar menggunakan HDFS.
-- Menjalankan training data menggunakan Python.
-- Memanfaatkan worker node agar ikut membantu proses komputasi.
-- Mengontrol proses training dari master node.
-- Menampilkan visualisasi hasil training menggunakan Streamlit.
+## 1. Tujuan Sistem
 
-Dataset yang digunakan:
+Sistem dibangun untuk:
+- preprocessing dataset review buku Amazon,
+- klasifikasi sentimen (baseline + transformer),
+- rekomendasi buku hybrid,
+- komparasi mode training (`without_worker` vs `with_worker`),
+- kontrol pipeline melalui Streamlit.
 
-```text
-Nama dataset : Amazon Books Reviews
-Sumber       : Kaggle
-URL          : https://www.kaggle.com/datasets/mohamedbakhet/amazon-books-reviews/data?select=Books_rating.csv
-File utama   : Books_rating.csv
-Ukuran       : ±3 GB
-Bahasa ML    : Python
-```
+## 2. Topologi Cluster
 
----
+Komponen node:
+- Master: `fadhli`
+- Worker: `worker1`, `worker2`
 
-## 2. Spesifikasi Node
+Layanan:
+- HDFS NameNode di master.
+- HDFS DataNode di worker.
+- YARN ResourceManager di master.
+- YARN NodeManager di worker.
+- Streamlit dashboard di master.
 
-| Tipe | Nama Host | OS | Peran |
-|---|---|---|---|
-| Master | fadhli | Linux | NameNode, ResourceManager, Spark Driver, Streamlit |
-| Worker | worker1 | Linux Server | DataNode, NodeManager, Spark Executor |
-| Worker | worker2 | Linux Server | DataNode, NodeManager, Spark Executor |
+## 3. Arsitektur Eksekusi
 
----
+### 3.1 Mode `without_worker`
 
-## 3. Arsitektur Umum
+Semua tahap berjalan di master:
+1. Load CSV lokal.
+2. Preprocess + split lokal.
+3. Train sentiment baseline.
+4. Optional train transformer.
+5. Train recommender.
+6. Compile final report.
 
-```text
-                         User / Admin
-                              |
-                              v
-                    +------------------+
-                    | Master: fadhli   |
-                    | Linux            |
-                    |------------------|
-                    | NameNode         |
-                    | ResourceManager  |
-                    | Spark Driver     |
-                    | Streamlit App    |
-                    | History Server   |
-                    +---------+--------+
-                              |
-              --------------------------------
-              |                              |
-              v                              v
-+-------------------------+      +-------------------------+
-| Worker: worker1         |      | Worker: worker2         |
-| Linux Server            |      | Linux Server            |
-|-------------------------|      |-------------------------|
-| DataNode                |      | DataNode                |
-| NodeManager             |      | NodeManager             |
-| Spark Executor          |      | Spark Executor          |
-+-------------------------+      +-------------------------+
+### 3.2 Mode `with_worker`
 
-Storage          : HDFS
-Resource Manager : YARN
-Training Engine  : Apache Spark / PySpark
-Visualization    : Streamlit
-```
+Arsitektur hybrid:
+1. Spark preprocess di worker (YARN executors) menulis output Parquet ke HDFS.
+2. Master mengambil output Parquet melalui bridge HDFS->local (cache persisten).
+3. Preprocess lanjutan lokal (lemmatization + split train/val/test).
+4. Training model tetap di master.
 
----
+Kesimpulan mode ini:
+- distributed preprocessing: ya,
+- distributed model training: belum.
 
-## 4. Komponen Utama
+## 4. Komponen Kode dan Peran
 
-### 4.1 Hadoop HDFS
+- `machine_learning/src/spark_preprocess.py`: preprocessing distributed.
+- `machine_learning/src/data_loader.py`: bridge dan loader data local/HDFS.
+- `machine_learning/src/preprocessing.py`: feature text lanjutan + split.
+- `machine_learning/src/train_sentiment.py`: baseline sentiment.
+- `machine_learning/src/train_sentiment_transformer.py`: fine-tuning transformer.
+- `machine_learning/src/train_recommender.py`: recommender hybrid.
+- `machine_learning/src/training_runtime.py`: orchestration training + compare mode.
+- `streamlit/app.py`: UI operasional.
+- `scripts/*.sh`: operasi cluster/network/reset/upload/submit.
 
-HDFS digunakan sebagai sistem penyimpanan terdistribusi.
+## 5. Data Flow
 
-Peran HDFS:
-
-- Menyimpan dataset `Books_rating.csv`.
-- Membagi file menjadi beberapa block.
-- Mendistribusikan block data ke worker node.
-- Menyediakan akses data untuk Spark.
-
-Service HDFS:
-
-| Service | Lokasi |
-|---|---|
-| NameNode | master/fadhli |
-| DataNode | worker1, worker2 |
-| SecondaryNameNode | master/fadhli |
-
----
-
-### 4.2 YARN
-
-YARN digunakan sebagai resource manager cluster.
-
-Peran YARN:
-
-- Mengatur resource CPU dan RAM.
-- Menjalankan aplikasi Spark.
-- Menentukan worker mana yang menjalankan executor.
-- Memantau status job training.
-
-Service YARN:
-
-| Service | Lokasi |
-|---|---|
-| ResourceManager | master/fadhli |
-| NodeManager | worker1, worker2 |
-
----
-
-### 4.3 Apache Spark
-
-Spark digunakan sebagai engine utama untuk menjalankan proses training dan preprocessing data.
-
-Peran Spark:
-
-- Membaca dataset dari HDFS.
-- Membagi proses komputasi ke worker.
-- Menjalankan executor pada worker node.
-- Mengirim hasil training ke HDFS atau local storage master.
-
-Mode yang disarankan:
+### 5.1 Local data flow
 
 ```text
-Spark on YARN
+machine_learning/dataset/Books_rating.csv
+  -> data_loader.load_reviews
+  -> preprocessing.preprocess_and_split
+  -> data/processed/*.csv
+  -> training modules
+  -> models/* + reports/*
 ```
 
-Command umum:
-
-```bash
-spark-submit \
-  --master yarn \
-  --deploy-mode client \
-  --num-executors 2 \
-  --executor-cores 2 \
-  --executor-memory 2G \
-  --driver-memory 2G \
-  train.py
-```
-
----
-
-### 4.4 Streamlit
-
-Streamlit digunakan sebagai dashboard di master.
-
-Peran Streamlit:
-
-- Menjalankan tombol trigger training.
-- Menampilkan status atau log training.
-- Menampilkan hasil metric, grafik, atau output model.
-- Membaca hasil dari file output training.
-
-Lokasi:
+### 5.2 Worker-assisted data flow
 
 ```text
-Master node: fadhli
+HDFS /user/<user>/amazon_books/Books_rating.csv
+  -> spark_preprocess.py (Spark on YARN)
+  -> HDFS /user/<user>/output/amazon_books_ml/processed (Parquet)
+  -> data_loader.load_reviews_from_hdfs_spark_output
+  -> preprocess_and_split (local finalize)
+  -> training modules (master)
 ```
 
-Port default:
-
-```text
-8501
-```
-
-Akses:
-
-```text
-http://fadhli:8501
-```
-
----
-
-## 5. Alur Kerja Sistem
-
-```text
-1. Dataset di-download dari Kaggle ke master.
-2. Dataset di-upload ke HDFS.
-3. User membuka dashboard Streamlit di master.
-4. User menekan tombol mulai training.
-5. Streamlit menjalankan spark-submit.
-6. Spark Driver berjalan di master.
-7. YARN mengalokasikan resource ke worker1 dan worker2.
-8. Spark Executor berjalan di worker.
-9. Worker membaca block data dari HDFS.
-10. Worker membantu proses preprocessing/training.
-11. Hasil training disimpan ke HDFS atau local master.
-12. Streamlit membaca hasil training.
-13. User melihat visualisasi hasil training.
-```
-
----
-
-## 6. Arsitektur Data
-
-```text
-Local Master
-/home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews/machine_learning/dataset/Books_rating.csv
-        |
-        | hdfs dfs -put
-        v
-HDFS
-/user/fadhli/amazon_books/Books_rating.csv
-        |
-        | spark.read.csv()
-        v
-Spark DataFrame
-        |
-        | preprocessing / training
-        v
-Output
-/user/fadhli/output/amazon_books_ml/processed
-/home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews/output/metrics.json
-/home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews/machine_learning/models/
-```
-
----
-
-## 7. Struktur Direktori Project
-
-Struktur direktori yang disarankan di master:
-
-```text
-/home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews/
-├── machine_learning/
-│   ├── config.yaml
-│   ├── dataset/
-│   │   └── Books_rating.csv
-│   └── src/
-│       └── spark_preprocess.py
-├── scripts/
-│   ├── upload_to_hdfs.sh
-│   ├── start_cluster.sh
-│   ├── stop_cluster.sh
-│   ├── submit_training.sh
-│   └── spark_submit_training.sh
-├── streamlit/
-│   └── app.py
-├── output/
-│   └── metrics.json
-├── config/
-│   └── cluster.yaml
-└── README.md
-```
-
----
-
-## 8. Kebutuhan Software
-
-Install pada semua node:
-
-| Software | Fungsi |
-|---|---|
-| Java JDK | Runtime Hadoop dan Spark |
-| Apache Hadoop | HDFS dan YARN |
-| Apache Spark | Engine distributed processing |
-| Python 3 | Bahasa machine learning |
-| PySpark | Integrasi Python dengan Spark |
-| SSH | Komunikasi antar node |
-| rsync/scp | Sinkronisasi file konfigurasi |
-
-Install hanya di master:
-
-| Software | Fungsi |
-|---|---|
-| Streamlit | Dashboard visualisasi |
-| Kaggle CLI | Download dataset |
-| Python library ML | Dependensi kode training |
-
----
-
-## 9. Rekomendasi Hardware Minimum
-
-| Node | CPU | RAM | Disk |
-|---|---:|---:|---:|
-| fadhli | 4 core | 8–16 GB | 40 GB+ |
-| worker1 | 4 core | 8–16 GB | 40 GB (usable ~38 GB) |
-| worker2 | 4 core | 8–16 GB | 40 GB (usable ~38 GB) |
-
-Catatan:
-
-- Dataset 3 GB masih relatif kecil untuk Hadoop.
-- Hadoop tetap cocok untuk latihan arsitektur distributed.
-- Untuk performa lebih baik, gunakan SSD.
-- Pastikan jaringan antar node stabil.
-
----
-
-## 10. Kebutuhan Jaringan
-
-Semua node harus bisa saling berkomunikasi menggunakan hostname.
-
-Contoh konfigurasi `/etc/hosts`:
-
-```text
-192.168.0.102 fadhli
-192.168.0.103 worker1
-192.168.0.105 worker2
-```
-
-Port penting:
-
-| Service | Port |
-|---|---:|
-| HDFS NameNode UI | 9870 |
-| YARN ResourceManager UI | 8088 |
-| Streamlit | 8501 |
-| HDFS RPC | 9000 |
-
----
-
-## 11. Desain Resource Training
-
-Untuk 2 worker, konfigurasi awal Spark yang disarankan:
-
-```text
-num-executors     : 2
-executor-cores    : 2
-executor-memory   : 2G
-driver-memory     : 2G
-deploy-mode       : client
-master            : yarn
-```
-
-Contoh:
-
-```bash
-spark-submit \
-  --master yarn \
-  --deploy-mode client \
-  --num-executors 2 \
-  --executor-cores 2 \
-  --executor-memory 2G \
-  --driver-memory 2G \
-  /home/fadhli/MY PROJECT/Hadoop_Amazon_Books_Reviews/machine_learning/src/spark_preprocess.py
-```
-
----
-
-## 12. Catatan Penting Tentang Machine Learning
-
-Agar worker benar-benar membantu training, kode Python harus mendukung distributed computing.
-
-### Opsi terbaik
-
-```text
-PySpark MLlib
-```
-
-Dengan PySpark MLlib:
-
-- Data dibaca dari HDFS.
-- Transformasi data berjalan secara distributed.
-- Training model tertentu bisa berjalan di worker.
-- Resource dikontrol oleh YARN.
-
-### Jika kode masih memakai pandas/scikit-learn
-
-Worker tidak otomatis membantu training penuh.
-
-Kemungkinan pola yang bisa digunakan:
-
-```text
-Spark untuk preprocessing distributed
-pandas/scikit-learn untuk training akhir di master
-```
-
-Atau kode perlu dimigrasikan ke PySpark.
-
----
-
-## 13. Rencana Konfigurasi
-
-Tahapan konfigurasi:
-
-```text
-1. Setup hostname dan IP antar node.
-2. Setup user hadoop di semua node.
-3. Setup passwordless SSH dari master ke worker.
-4. Install Java di semua node.
-5. Install Hadoop di semua node.
-6. Konfigurasi core-site.xml.
-7. Konfigurasi hdfs-site.xml.
-8. Konfigurasi yarn-site.xml.
-9. Konfigurasi mapred-site.xml.
-10. Konfigurasi workers.
-11. Format NameNode.
-12. Start HDFS.
-13. Start YARN.
-14. Upload dataset ke HDFS.
-15. Install Spark di semua node.
-16. Test spark-submit di YARN.
-17. Integrasi spark-submit dengan Streamlit.
-18. Validasi worker ikut memproses job.
-```
-
----
-
-## 14. File Konfigurasi Utama
-
-### 14.1 core-site.xml
-
-```xml
-<configuration>
-    <property>
-        <name>fs.defaultFS</name>
-        <value>hdfs://fadhli:9000</value>
-    </property>
-</configuration>
-```
-
-### 14.2 hdfs-site.xml
-
-```xml
-<configuration>
-    <property>
-        <name>dfs.namenode.name.dir</name>
-        <value>file:///data/hadoop/hdfs/namenode</value>
-    </property>
-
-    <property>
-        <name>dfs.datanode.data.dir</name>
-        <value>file:///data/hadoop/hdfs/datanode</value>
-    </property>
-
-    <property>
-        <name>dfs.replication</name>
-        <value>2</value>
-    </property>
-
-    <property>
-        <name>dfs.namenode.rpc-bind-host</name>
-        <value>0.0.0.0</value>
-    </property>
-
-    <property>
-        <name>dfs.namenode.http-bind-host</name>
-        <value>0.0.0.0</value>
-    </property>
-
-    <property>
-        <name>dfs.namenode.datanode.registration.ip-hostname-check</name>
-        <value>false</value>
-    </property>
-</configuration>
-```
-
-### 14.3 yarn-site.xml
-
-```xml
-<configuration>
-    <property>
-        <name>yarn.resourcemanager.hostname</name>
-        <value>fadhli</value>
-    </property>
-
-    <property>
-        <name>yarn.nodemanager.aux-services</name>
-        <value>mapreduce_shuffle</value>
-    </property>
-
-    <property>
-        <name>yarn.nodemanager.resource.memory-mb</name>
-        <value>8192</value>
-    </property>
-
-    <property>
-        <name>yarn.scheduler.maximum-allocation-mb</name>
-        <value>8192</value>
-    </property>
-
-    <property>
-        <name>yarn.nodemanager.resource.cpu-vcores</name>
-        <value>4</value>
-    </property>
-</configuration>
-```
-
-### 14.4 mapred-site.xml
-
-```xml
-<configuration>
-    <property>
-        <name>mapreduce.framework.name</name>
-        <value>yarn</value>
-    </property>
-</configuration>
-```
-
-### 14.5 workers
-
-```text
-worker1
-worker2
-```
-
----
-
-## 15. Validasi Keberhasilan
-
-### 15.1 Cek HDFS
-
-```bash
-hdfs dfsadmin -report
-```
-
-Indikator berhasil:
-
-```text
-Live datanodes: 2
-```
-
-### 15.2 Cek YARN
-
-```bash
-yarn node -list
-```
-
-Indikator berhasil:
-
-```text
-Total Nodes: 2
-```
-
-### 15.3 Cek Web UI
-
-```text
-HDFS UI : http://fadhli:9870
-YARN UI : http://fadhli:8088
-```
-
-### 15.4 Cek Dataset
-
-```bash
-hdfs dfs -ls -h /user/fadhli/amazon_books
-```
-
-### 15.5 Cek Spark Job
-
-Jalankan:
-
-```bash
-spark-submit \
-  --master yarn \
-  --deploy-mode client \
-  --num-executors 2 \
-  --executor-cores 2 \
-  --executor-memory 2G \
-  train.py
-```
-
-Lalu cek YARN UI:
-
-```text
-http://fadhli:8088
-```
-
----
-
-## 16. Output yang Diharapkan
-
-Setelah sistem selesai dibangun, output akhir yang diharapkan:
-
-```text
-1. Dataset tersimpan di HDFS.
-2. worker1 dan worker2 aktif sebagai DataNode.
-3. worker1 dan worker2 aktif sebagai NodeManager.
-4. Spark job dapat dijalankan dari master.
-5. Training dapat dikontrol dari master.
-6. Worker membantu proses komputasi.
-7. Hasil training tersimpan di output directory.
-8. Streamlit dapat menampilkan hasil training.
-```
-
----
-
-## 17. Risiko dan Hal yang Perlu Diperhatikan
-
-| Risiko | Penjelasan | Solusi |
-|---|---|---|
-| Worker tidak ikut training | Kode masih pandas/sklearn biasa | Gunakan PySpark atau distributed ML |
-| SSH gagal | Passwordless SSH belum benar | Ulangi ssh-copy-id |
-| DataNode tidak muncul | Hostname/IP salah | Cek `/etc/hosts` |
-| Spark gagal submit | Hadoop config tidak terbaca | Set `HADOOP_CONF_DIR` |
-| Memory error | Executor memory terlalu kecil | Naikkan executor-memory |
-| Dataset lambat dibaca | Disk/jaringan lambat | Gunakan SSD dan jaringan stabil |
-
----
-
-## 18. Kesimpulan Arsitektur
-
-Arsitektur yang direkomendasikan adalah:
-
-```text
-Hadoop HDFS + YARN + Apache Spark + PySpark + Streamlit
-```
-
-Dengan pembagian:
-
-```text
-fadhli  : master controller
-worker1 : compute dan storage worker
-worker2 : compute dan storage worker
-```
-
-Arsitektur ini sesuai untuk kebutuhan:
-
-- Distributed storage.
-- Distributed training/preprocessing.
-- Kontrol training dari master.
-- Visualisasi hasil dengan Streamlit.
-- Integrasi dengan kode Python yang sudah dimiliki.
+## 6. Kontrol Operasional
+
+### 6.1 CLI
+
+Entry utama:
+- `python3 machine_learning/main.py --step ...`
+
+Step penting:
+- `train_pipeline`
+- `compare_training_modes`
+
+### 6.2 Dashboard
+
+`streamlit/app.py` menyediakan:
+- Pipeline runner dengan live stdout/stderr.
+- Cluster start/stop.
+- Spark submit preprocess.
+- Browse/upload/download HDFS.
+- Reports komparasi mode detail.
+- Sentiment dan recommender inference.
+
+## 7. Manajemen Resource dan Stabilitas
+
+Implementasi saat ini memiliki proteksi:
+
+1. Batas RAM master (`training.master_ram_limit_gb`, default 3GB) via `RLIMIT_AS`.
+2. Safety margin untuk mencegah limit diterapkan saat proses sudah dekat batas.
+3. Fallback parser pada pembacaan CSV besar:
+- sentiment split reader fallback ke `engine='python'`.
+- recommender interactions loader membaca chunked + fallback engine.
+4. Bridge HDFS dengan cache persisten agar run berikutnya tidak selalu download ulang.
+5. Preflight YARN pada `spark_submit_training.sh` untuk mencegah job menggantung di ACCEPTED saat NodeManager 0.
+
+## 8. Artifact Arsitektur
+
+Output utama:
+- Data processed: `machine_learning/data/processed/`
+- Model: `machine_learning/models/`
+- Report: `machine_learning/reports/`
+- Eksperimen komparasi: `machine_learning/reports/experiments/`
+- Log: `machine_learning/logs/`
+- Tracking MLflow local: `machine_learning/mlruns/`
+
+## 9. Risiko dan Batasan Saat Ini
+
+1. Training sentiment/recommender belum distributed ke worker.
+2. Performa mode `with_worker` bergantung kualitas jaringan VM dan throughput bridge HDFS.
+3. Transformer training masih sensitif ke resource CPU/RAM/GPU environment.
+4. Script network fix bersifat sistem-level, wajib dijalankan hati-hati (root).
+
+## 10. Arah Pengembangan
+
+Prioritas jika ingin scale-up:
+1. Migrasi training model ke framework distributed (Spark MLlib atau strategi distributed lain).
+2. Menyatukan preprocessing text lanjutan ke jalur distributed agar beban master berkurang.
+3. Menambahkan benchmark otomatis per skenario cluster/network.
+4. Menambahkan test automation untuk validasi artifact dan schema output antar step.

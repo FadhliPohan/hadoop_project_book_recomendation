@@ -1,62 +1,69 @@
 # Hadoop Amazon Books Reviews
 
-Project ini berisi pipeline machine learning untuk:
-- Sentiment analysis review buku Amazon
-- Recommender system berbasis rating, sentiment, dan konten review
-- Orkestrasi pipeline yang aman dari training otomatis tidak sengaja
-- Eksperimen komparasi training `without_worker` vs `with_worker` (worker hanya untuk preprocessing)
+Project ini adalah aplikasi end-to-end untuk:
+- analisis sentimen review buku Amazon,
+- sistem rekomendasi buku hybrid,
+- eksperimen komparasi pipeline `without_worker` vs `with_worker`,
+- monitoring pipeline melalui dashboard Streamlit.
 
-## Struktur Project
+Implementasi saat ini memakai arsitektur **hybrid local + cluster**:
+- `without_worker`: preprocessing + training model berjalan di master (lokal Python).
+- `with_worker`: preprocessing awal berjalan distributed di Spark/YARN (worker), lalu hasilnya dijembatani ke master untuk training model lokal.
+
+## Ringkasan Cepat
+
+1. Aktifkan environment dan install dependency.
+2. Siapkan dataset pada `machine_learning/dataset/`.
+3. Jalankan pipeline dari CLI atau dari Streamlit.
+4. Untuk komparasi mode training, jalankan `compare_training_modes`.
+
+## Struktur Inti Repository
 
 ```text
 Hadoop_Amazon_Books_Reviews/
 ├── machine_learning/
-│   ├── config.yaml
-│   ├── requirements.txt
 │   ├── main.py
+│   ├── config.yaml
+│   ├── src/
 │   ├── dataset/
 │   ├── data/
-│   │   ├── raw/
-│   │   └── processed/
-│   ├── src/
-│   │   ├── data_loader.py
-│   │   ├── preprocessing.py
-│   │   ├── eda.py
-│   │   ├── train_sentiment.py
-│   │   ├── train_sentiment_transformer.py
-│   │   ├── train_recommender.py
-│   │   ├── inference.py
-│   │   ├── evaluate.py
-│   │   ├── mlflow_tracker.py
-│   │   └── utils.py
-│   ├── notebooks/
 │   ├── models/
 │   ├── reports/
 │   ├── logs/
-│   └── mlruns/
+│   ├── mlruns/
+│   └── documentation/
 ├── streamlit/
 │   └── app.py
-└── scripts/
-    ├── start_cluster.sh
-    ├── stop_cluster.sh
-    ├── submit_training.sh
-    └── upload_to_hdfs.sh
+├── scripts/
+├── config/
+└── documentation/
 ```
+
+Detail fungsi setiap file ada di [`documentation/structure.md`](documentation/structure.md).
 
 ## Setup
 
-Gunakan virtual environment lokal:
-
 ```bash
 python3 -m venv .venv
-. .venv/bin/activate
+source .venv/bin/activate
 pip install -r machine_learning/requirements.txt
-pip install streamlit
 ```
 
-## Menjalankan Pipeline
+## Dataset
 
-Masuk ke root project, lalu jalankan:
+Dataset utama:
+- Amazon Books Reviews (Kaggle)
+- https://www.kaggle.com/datasets/mohamedbakhet/amazon-books-reviews/data
+
+Letakkan file CSV ke:
+- `machine_learning/dataset/Books_rating.csv`
+- `machine_learning/dataset/books_data.csv` (opsional metadata)
+
+## Menjalankan Pipeline (CLI)
+
+Semua perintah dijalankan dari root project.
+
+### Non-training steps
 
 ```bash
 python3 machine_learning/main.py --step eda
@@ -64,19 +71,7 @@ python3 machine_learning/main.py --step preprocess
 python3 machine_learning/main.py --step evaluate
 ```
 
-Training tidak akan berjalan kecuali Anda menambahkan `--allow-training`.
-
-## Mode Training Baru
-
-Pipeline sekarang mendukung dua mode:
-
-- `without_worker`: preprocess + training dilakukan di master.
-- `with_worker`: preprocessing awal dilakukan distributed via Spark/Hadoop worker, lalu training tetap di master.
-
-Untuk menjaga fairness eksperimen, batas RAM proses training master default adalah **3GB** (bisa override dengan `--ram-limit-gb`).
-Jika limit terlalu ketat terhadap footprint proses saat ini, pipeline akan otomatis melewati limit dan memberi warning agar proses tidak crash (dikontrol oleh `training.ram_limit_safety_margin_mb`).
-
-Contoh training eksplisit:
+### Training steps (wajib `--allow-training`)
 
 ```bash
 python3 machine_learning/main.py --step train_sentiment_baseline --allow-training
@@ -84,62 +79,57 @@ python3 machine_learning/main.py --step train_sentiment_transformer --allow-trai
 python3 machine_learning/main.py --step train_recommender --allow-training
 ```
 
-Training pipeline single-mode:
+### Training pipeline per mode
 
 ```bash
-# Full train tanpa worker
 python3 machine_learning/main.py --step train_pipeline --allow-training \
   --training-mode without_worker --ram-limit-gb 3
 
-# Full train via worker (Spark preprocess sudah tersedia di HDFS)
 python3 machine_learning/main.py --step train_pipeline --allow-training \
   --training-mode with_worker --ram-limit-gb 3
+```
 
-# Jika ingin pipeline otomatis submit Spark preprocess dulu
+Jika ingin auto submit Spark preprocess saat mode `with_worker`:
+
+```bash
 python3 machine_learning/main.py --step train_pipeline --allow-training \
   --training-mode with_worker --run-worker-preprocess --ram-limit-gb 3
 ```
 
-## Optimasi Kecepatan `with_worker` (VirtualBox)
-
-Untuk koneksi antar VM yang terbatas, aktifkan output Spark yang lebih kecil agar bridge HDFS ke master jauh lebih cepat:
-
-- `machine_learning/config.yaml`:
-  - `spark_preprocess.max_rows: 120000`
-  - `spark_preprocess.sample_fraction: 1.0` (ubah < 1.0 jika ingin lebih kecil lagi)
-
-Catatan:
-- `max_rows=0` berarti simpan full output Spark ke HDFS.
-- Bridge HDFS sekarang memakai cache persisten di `/tmp/spark_hdfs_bridge_cache`, jadi run berikutnya bisa reuse tanpa download ulang file besar jika output HDFS belum berubah.
-
-Jika ingin reset cache bridge:
-
-```bash
-rm -rf /tmp/spark_hdfs_bridge_cache
-```
-
-Menjalankan eksperimen komparasi dua mode sekaligus:
+### Komparasi dua mode training
 
 ```bash
 python3 machine_learning/main.py --step compare_training_modes --allow-training \
   --ram-limit-gb 3
 ```
 
-Output perbandingan:
+Artifact komparasi:
 - `machine_learning/reports/training_mode_comparison.json`
 - `machine_learning/reports/experiments/without_worker_latest_run.json`
 - `machine_learning/reports/experiments/with_worker_latest_run.json`
 
-Jalankan semua step:
+### Step `all`
 
 ```bash
-# Aman: hanya non-training
+# Aman: tanpa training
 python3 machine_learning/main.py --step all
 
-# Full termasuk training
+# Full: dengan training
 python3 machine_learning/main.py --step all --allow-training \
   --training-mode without_worker --ram-limit-gb 3
 ```
+
+## Menjalankan Spark Preprocess di Cluster
+
+```bash
+bash scripts/start_cluster.sh
+bash scripts/upload_to_hdfs.sh
+bash scripts/spark_submit_training.sh preprocess_spark 2 2 2G 2G
+```
+
+Catatan:
+- `preprocess_spark` menulis output Parquet ke HDFS.
+- Training model tetap berjalan lokal di master.
 
 ## Menjalankan Dashboard Streamlit
 
@@ -147,41 +137,41 @@ python3 machine_learning/main.py --step all --allow-training \
 streamlit run streamlit/app.py
 ```
 
-Jika command `streamlit` belum ada di PATH:
+Tab utama dashboard:
+- Overview
+- EDA
+- Pipeline
+- Reports
+- Inference
+- Cluster
 
-```bash
-python3 -m streamlit run streamlit/app.py
-```
+## File Output Utama
 
-Fitur dashboard:
-- Trigger step pipeline
-- Pilihan mode training (`without_worker` / `with_worker`)
-- Trigger komparasi dua mode training dan ringkasan delta waktu/metric
-- Trigger start/stop cluster script
-- Inference sentiment (jika model tersedia)
-- Inference rekomendasi user (jika artifact rekomendasi tersedia)
+- Preprocess:
+  - `machine_learning/data/processed/processed_reviews.csv`
+  - `machine_learning/data/processed/train.csv`
+  - `machine_learning/data/processed/validation.csv`
+  - `machine_learning/data/processed/test.csv`
+- Sentiment baseline:
+  - `machine_learning/models/sentiment/baseline/`
+- Sentiment transformer:
+  - `machine_learning/models/sentiment/transformer/distilbert_v1/`
+- Recommender:
+  - `machine_learning/models/recommender/`
+  - `machine_learning/reports/recommender_metrics.json`
+- Final report:
+  - `machine_learning/reports/final_report.json`
 
-## Dataset
+## Dokumentasi
 
-Dataset acuan:
-- Amazon Books Reviews (Kaggle)
-- https://www.kaggle.com/datasets/mohamedbakhet/amazon-books-reviews/data
+- Arsitektur: [`documentation/arsitecture_plant.md`](documentation/arsitecture_plant.md)
+- Tutorial operasional: [`documentation/tutorial.md`](documentation/tutorial.md)
+- Struktur file dan fungsi per file: [`documentation/structure.md`](documentation/structure.md)
+- Q&A teknis: [`documentation/QNA.md`](documentation/QNA.md)
+- Progress ML: [`machine_learning/documentation/report_progres.md`](machine_learning/documentation/report_progres.md)
 
-Catatan:
-- File dataset CSV sengaja di-ignore dari git.
+## Catatan Batasan Saat Ini
 
-## Kebijakan File Besar
-
-Agar repository tetap ringan, file artifact training tidak dipush:
-- `machine_learning/data/processed/*`
-- `machine_learning/models/*`
-- `machine_learning/reports/*`
-- `machine_learning/logs/*`
-- `machine_learning/mlruns/*`
-
-Folder tetap dipertahankan via `.gitkeep`.
-
-## Status Pengembangan
-
-Progress detail ada di:
-- `machine_learning/documentation/report_progres.md`
+- Worker belum melatih model sentiment/recommender secara distributed.
+- Worker dipakai untuk preprocessing Spark, bukan training model final.
+- Jika cluster lambat, `spark_hdfs` bridge ke local bisa lambat; gunakan `sample_fraction`/`max_rows` untuk mengurangi ukuran output Spark.

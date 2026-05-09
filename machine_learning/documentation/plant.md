@@ -1,629 +1,230 @@
-Kamu adalah seorang Senior Data Scientist dan Machine Learning Engineer yang ahli dalam NLP, Sentiment Analysis, dan Recommender System menggunakan Python.
-
-Saya ingin membuat project machine learning dengan judul:
-
-**Review Sentiment Analysis and Recommender System menggunakan dataset Amazon Books Reviews dari Kaggle**
-
-Dataset:
-https://www.kaggle.com/datasets/mohamedbakhet/amazon-books-reviews/data
-note : sudah saya download pda folder dataset
-
-Tujuan project:
-
-1. Melakukan analisis sentimen terhadap review buku Amazon.
-2. Membangun sistem rekomendasi buku berdasarkan rating, user behavior, dan hasil sentimen.
-3. Membuat pipeline training yang rapi, modular, reproducible, dan setiap hasil training wajib disimpan.
-4. Menggunakan Python sebagai bahasa utama.
-5. Project harus cocok untuk kebutuhan akademik, portofolio, dan bisa dikembangkan ke production-level.
-6. lokasi pengkodingan pada folder machine_learning
-7. setiap progress akan dibuatkan secara detail di report_progeress.md dimana yang sudah selesai dan belum selesai. sehingga apbila saya kehabisan token akan langsung bisa dilanjutkan kembali
-
-Buatkan saya project secara lengkap dengan tahapan berikut:
-
----
-
-## 1. Project Planning dan Arsitektur
-
-Jelaskan arsitektur lengkap project dari awal sampai akhir, mencakup:
-
-* Data ingestion
-* Data validation
-* Exploratory Data Analysis
-* Data preprocessing
-* Feature engineering
-* Sentiment analysis model
-* Recommender system model
-* Model evaluation
-* Model saving
-* Experiment tracking
-* Final report
-
-Buat struktur folder project yang rapi seperti:
-
-project/
-├── data/
-│   ├── raw/
-│   ├── processed/
-├── notebooks/
-├── src/
-│   ├── data_loader.py
-│   ├── preprocessing.py
-│   ├── eda.py
-│   ├── train_sentiment.py
-│   ├── train_recommender.py
-│   ├── evaluate.py
-│   ├── utils.py
-├── models/
-│   ├── sentiment/
-│   ├── recommender/
-├── reports/
-├── logs/
-├── mlruns/
-├── config.yaml
-├── requirements.txt
-└── main.py
+# Technical Design Machine Learning Module (As-Is)
 
-Jelaskan fungsi setiap folder dan file.
+Dokumen ini menjelaskan desain implementasi modul ML berdasarkan kode aktif di folder `machine_learning/`.
 
----
+Tanggal pembaruan: 2026-05-09.
 
-## 2. Data Understanding dan EDA
+## 1. Tujuan Modul ML
 
-Lakukan analisis data secara lengkap.
+1. Menyiapkan data review untuk analisis sentimen dan rekomendasi.
+2. Melatih model sentiment baseline dan transformer.
+3. Melatih model recommender hybrid.
+4. Menyimpan artifact model, metrics, dan report komparasi eksperimen.
 
-Dataset kemungkinan memiliki kolom seperti:
+## 2. Entry Point dan Orkestrasi
 
-* reviewerID
-* asin
-* reviewerName
-* helpful
-* reviewText
-* overall
-* summary
-* unixReviewTime
-* reviewTime
+- Entry CLI: `machine_learning/main.py`
+- Orchestrator mode training: `src/training_runtime.py`
 
-Tugas kamu:
+Step yang tersedia:
+- `eda`
+- `preprocess`
+- `train_sentiment_baseline`
+- `train_sentiment_transformer`
+- `train_recommender`
+- `train_pipeline`
+- `compare_training_modes`
+- `evaluate`
+- `all`
 
-* Load dataset menggunakan pandas.
-* Tampilkan ukuran dataset.
-* Tampilkan tipe data setiap kolom.
-* Cek missing values.
-* Cek data duplikat.
-* Analisis distribusi rating.
-* Analisis panjang review.
-* Analisis jumlah user unik.
-* Analisis jumlah produk/buku unik.
-* Analisis jumlah review per user.
-* Analisis jumlah review per buku.
-* Visualisasikan distribusi rating.
-* Visualisasikan distribusi panjang review.
-* Tampilkan contoh review positif, netral, dan negatif.
-* Berikan insight dari hasil EDA.
+Guard keamanan:
+- Step training wajib `--allow-training`.
 
-Simpan hasil EDA dalam bentuk:
+## 3. Sumber Data
 
-* Grafik PNG
-* Ringkasan teks
-* File CSV hasil statistik dasar
+### 3.1 Local source
 
----
+- `machine_learning/dataset/Books_rating.csv`
+- dimuat oleh `src/data_loader.py::load_reviews`.
 
-## 3. Labeling Sentiment
+### 3.2 Spark-HDFS source
 
-Buat label sentimen berdasarkan kolom rating `overall`.
+- Hasil `spark_preprocess.py` pada HDFS path `.../output/.../processed`.
+- dimuat oleh `src/data_loader.py::load_reviews_from_hdfs_spark_output`.
+- menggunakan bridge HDFS -> local cache persisten.
 
-Aturan label:
+## 4. Preprocessing
 
-* Rating 1 dan 2 = Negative
-* Rating 3 = Neutral
-* Rating 4 dan 5 = Positive
+Modul: `src/preprocessing.py`
 
-Buat kolom baru bernama:
-
-`sentiment_label`
-
-Mapping label:
-
-* Negative = 0
-* Neutral = 1
-* Positive = 2
-
-Tampilkan distribusi label sentimen dan cek apakah data imbalance.
-
-Jika data imbalance, berikan solusi seperti:
-
-* class weight
-* undersampling
-* oversampling
-* stratified split
-
----
-
-## 4. Text Preprocessing
-
-Buat pipeline preprocessing teks untuk kolom `reviewText`.
-
-Langkah preprocessing:
-
-* Mengubah teks menjadi lowercase
-* Menghapus URL
-* Menghapus HTML tag
-* Menghapus angka jika tidak diperlukan
-* Menghapus tanda baca
-* Menghapus special character
-* Menghapus extra whitespace
-* Menghapus stopwords bahasa Inggris
-* Lemmatization
-* Tokenization
-
-Buat fungsi Python modular:
-
-* clean_text()
-* remove_stopwords()
-* lemmatize_text()
-* preprocess_text()
-
-Simpan hasil preprocessing ke:
-
-`data/processed/processed_reviews.csv`
-
-Pastikan preprocessing tidak menyebabkan data leakage.
-
----
-
-## 5. Data Splitting
-
-Pisahkan data menjadi:
-
-* Training set
-* Validation set
-* Test set
-
-Gunakan stratified split berdasarkan `sentiment_label`.
-
-Rasio:
-
-* Train: 70%
-* Validation: 15%
-* Test: 15%
-
-Simpan hasil split ke folder:
-
-data/processed/train.csv
-data/processed/validation.csv
-data/processed/test.csv
-
----
-
-## 6. Baseline Sentiment Model
-
-Bangun baseline model terlebih dahulu menggunakan:
-
-* TF-IDF Vectorizer
-* Logistic Regression
-* Naive Bayes
-* Linear SVM
-
-Lakukan training pada data train.
-
-Evaluasi pada validation dan test set menggunakan metrics:
-
-* Accuracy
-* Precision
-* Recall
-* F1-score
-* Confusion matrix
-* Classification report
-
-Simpan semua model baseline ke folder:
-
-models/sentiment/baseline/
-
-Simpan juga:
-
-* vectorizer
-* model
-* metrics JSON
-* confusion matrix PNG
-* classification report TXT
-
-Gunakan joblib untuk menyimpan model.
-
----
-
-## 7. Advanced Sentiment Model
-
-Bangun model advanced menggunakan Transformer.
-
-Gunakan salah satu model berikut:
-
-* distilbert-base-uncased
-* bert-base-uncased
-* roberta-base
-
-Prioritaskan `distilbert-base-uncased` karena lebih ringan.
-
-Langkah yang harus dilakukan:
-
-* Tokenisasi menggunakan HuggingFace tokenizer
-* Membuat Dataset class
-* Fine-tuning model untuk 3 kelas sentimen
-* Menggunakan train, validation, dan test split
-* Menggunakan early stopping
-* Menggunakan learning rate scheduler
-* Menyimpan checkpoint setiap epoch
-* Menyimpan model terbaik berdasarkan validation F1-score
-
-Training configuration:
-
-* max_length = 128 atau 256
-* batch_size = 16
-* learning_rate = 2e-5
-* epochs = 3 sampai 5
-* optimizer = AdamW
-* metric utama = weighted F1-score
-
-Simpan model ke:
-
-models/sentiment/transformer/
-
-Simpan:
-
-* tokenizer
-* model
-* training arguments
-* metrics
-* logs
-* classification report
-* confusion matrix
-* best checkpoint
-
----
-
-## 8. Experiment Tracking
-
-Gunakan MLflow untuk tracking semua eksperimen.
-
-Setiap training wajib mencatat:
-
-* Nama model
-* Hyperparameter
-* Dataset version
-* Train accuracy
-* Validation accuracy
-* Test accuracy
-* Precision
-* Recall
-* F1-score
-* Confusion matrix
-* Model artifact
-* Vectorizer/tokenizer artifact
-* Waktu training
-
-Buat experiment MLflow dengan nama:
-
-`amazon_books_sentiment_recommender`
-
-Pastikan setiap run memiliki nama yang jelas, contoh:
-
-* tfidf_logistic_regression_v1
-* tfidf_svm_v1
-* distilbert_sentiment_v1
-* svd_recommender_v1
-* hybrid_recommender_v1
-
----
-
-## 9. Recommender System
-
-Bangun recommender system berdasarkan dataset Amazon Books.
-
-Gunakan kolom:
-
-* reviewerID sebagai user_id
-* asin sebagai item_id
-* overall sebagai rating
-* sentiment_label atau sentiment_score sebagai tambahan fitur
-
-Bangun beberapa pendekatan:
-
-### A. Popularity-Based Recommender
-
-Rekomendasikan buku berdasarkan:
-
-* rata-rata rating tertinggi
-* jumlah review minimum
-* skor popularitas
-
-Simpan hasil rekomendasi ke CSV.
-
-### B. Collaborative Filtering
-
-Gunakan matrix factorization seperti:
-
-* SVD menggunakan library Surprise
-* Alternatif: implicit ALS jika cocok
-
-Evaluasi menggunakan:
-
-* RMSE
-* MAE
-
-Simpan model ke:
-
-models/recommender/collaborative_filtering/
-
-### C. Content-Based Filtering
-
-Gunakan fitur teks:
-
-* reviewText
-* summary
-* metadata buku jika tersedia
-
-Gunakan TF-IDF dan cosine similarity.
-
-Simpan similarity matrix atau pipeline model.
-
-### D. Hybrid Recommender
-
-Gabungkan:
-
-* Collaborative filtering score
-* Popularity score
-* Sentiment score
-
-Rumus contoh:
-
-final_score = 0.5 * collaborative_score + 0.3 * sentiment_score + 0.2 * popularity_score
-
-Berikan penjelasan kenapa hybrid recommender lebih kuat.
-
-Simpan model hybrid ke:
-
-models/recommender/hybrid/
-
----
-
-## 10. Evaluasi Recommender System
-
-Evaluasi recommender menggunakan:
-
-* RMSE
-* MAE
-* Precision@K
-* Recall@K
-* NDCG@K
-* Coverage
-* Diversity jika memungkinkan
-
-Gunakan K = 5 dan K = 10.
-
-Buat fungsi:
-
-* precision_at_k()
-* recall_at_k()
-* ndcg_at_k()
-
-Simpan hasil evaluasi ke:
-
-reports/recommender_metrics.json
-
----
-
-## 11. Model Saving dan Versioning
-
-Setiap hasil training wajib disimpan.
-
-Gunakan format berikut:
-
-models/
-├── sentiment/
-│   ├── baseline/
-│   │   ├── tfidf_logreg_v1.pkl
-│   │   ├── tfidf_svm_v1.pkl
-│   │   ├── metrics.json
-│   ├── transformer/
-│   │   ├── distilbert_v1/
-│   │   │   ├── model/
-│   │   │   ├── tokenizer/
-│   │   │   ├── metrics.json
-├── recommender/
-│   ├── popularity/
-│   ├── collaborative_filtering/
-│   ├── content_based/
-│   ├── hybrid/
-
-Setiap file model harus memiliki metadata:
-
-* nama model
-* tanggal training
-* dataset yang digunakan
-* hyperparameter
-* metrics
-* versi model
-* path model
-
-Buat file:
-
-`model_registry.json`
-
-untuk mencatat semua model yang sudah pernah dilatih.
-
----
-
-## 12. Inference Pipeline
-
-Buat script inference untuk sentiment analysis.
-
-Input:
-
-* teks review baru
+Tahapan:
+1. Mapping rating -> sentiment label.
+2. Cleaning text (lowercase, URL, HTML, non-alpha, whitespace).
+3. Stopword removal.
+4. Lemmatization.
+5. Split stratified train/validation/test.
 
 Output:
+- `data/processed/processed_reviews.csv`
+- `data/processed/train.csv`
+- `data/processed/validation.csv`
+- `data/processed/test.csv`
+- `data/processed/preprocess_metadata.json`
 
-* label sentimen
-* confidence score
-* probabilitas setiap kelas
+## 5. EDA
 
-Contoh:
+Modul: `src/eda.py`
 
-Input:
-"This book is very helpful and well written."
+Output utama:
+- statistik dasar dataset,
+- missing values,
+- distribusi rating,
+- distribusi panjang review,
+- contoh review per bucket sentimen,
+- insight ringkas.
+
+Lokasi:
+- `reports/eda/`
+
+## 6. Sentiment Baseline
+
+Modul: `src/train_sentiment.py`
+
+Model:
+- Logistic Regression
+- Multinomial Naive Bayes
+- LinearSVC
+
+Fitur:
+- TF-IDF dengan profil utama + fallback memory-safe.
+- evaluasi validation/test (accuracy, precision, recall, F1, classification report).
+- simpan confusion matrix dan model file.
 
 Output:
-{
-"sentiment": "Positive",
-"confidence": 0.94,
-"probabilities": {
-"Negative": 0.02,
-"Neutral": 0.04,
-"Positive": 0.94
-}
-}
+- `models/sentiment/baseline/*.pkl`
+- `models/sentiment/baseline/metrics.json`
+- confusion matrix dan report txt per model.
 
-Buat juga inference recommender.
+## 7. Sentiment Transformer
 
-Input:
+Modul: `src/train_sentiment_transformer.py`
 
-* user_id
+Implementasi:
+- HuggingFace tokenizer + Trainer.
+- early stopping callback.
+- menyimpan model terbaik + tokenizer + training args + metrics.
 
 Output:
+- `models/sentiment/transformer/distilbert_v1/model/`
+- `models/sentiment/transformer/distilbert_v1/tokenizer/`
+- `models/sentiment/transformer/distilbert_v1/metrics.json`
 
-* top-N book recommendation
+## 8. Recommender Hybrid
 
----
+Modul: `src/train_recommender.py`
 
-## 13. Main Pipeline
+Komponen:
+1. Popularity-based scoring.
+2. Collaborative filtering via SVD.
+3. Content-based TF-IDF item text.
+4. Hybrid scoring (`0.5 collab + 0.3 sentiment + 0.2 popularity`).
 
-Buat file `main.py` yang bisa menjalankan pipeline:
+Evaluasi:
+- RMSE
+- MAE
+- Precision@K
+- Recall@K
+- NDCG@K
+- Coverage@K
+- Diversity@K
 
-Pilihan command:
+Output:
+- `models/recommender/*`
+- `reports/recommender_metrics.json`
 
-python main.py --step eda
-python main.py --step preprocess
-python main.py --step train_sentiment_baseline
-python main.py --step train_sentiment_transformer
-python main.py --step train_recommender
-python main.py --step evaluate
-python main.py --step all
+## 9. Runtime Training Pipeline
 
-Gunakan argparse.
+Modul: `src/training_runtime.py`
 
----
+Fitur:
+1. Menjalankan stage pipeline secara berurutan.
+2. Logging progress dan ETA.
+3. Capture durasi stage dan peak memory.
+4. Enforcement RAM limit master (konfig default 3 GB).
+5. Menyimpan run summary per mode.
 
-## 14. Requirements
+Output:
+- `reports/experiments/without_worker_latest_run.json`
+- `reports/experiments/with_worker_latest_run.json`
 
-Buat file `requirements.txt` berisi library:
+## 10. Komparasi Mode Training
 
-* pandas
-* numpy
-* scikit-learn
-* matplotlib
-* seaborn
-* nltk
-* spacy
-* transformers
-* torch
-* datasets
-* evaluate
-* mlflow
-* joblib
-* surprise
-* scipy
-* tqdm
-* pyyaml
+Method: `compare_training_modes` di `training_runtime.py`
 
----
+Alur:
+1. Jalankan mode `without_worker`.
+2. Jalankan mode `with_worker`.
+3. Hitung delta KPI (`with - without`).
+4. Simpan error/warning per mode bila ada.
 
-## 15. Dokumentasi
+Output:
+- `reports/training_mode_comparison.json`
 
-Buat README.md yang menjelaskan:
+## 11. Evaluasi Final dan Registry
 
-* Deskripsi project
-* Dataset
-* Tujuan project
-* Struktur folder
-* Cara instalasi
-* Cara menjalankan EDA
-* Cara preprocessing
-* Cara training sentiment model
-* Cara training recommender system
-* Cara melihat hasil MLflow
-* Cara menjalankan inference
-* Hasil evaluasi model
-* Kesimpulan
-* Pengembangan selanjutnya
+### 11.1 Final report
 
----
+Modul: `src/evaluate.py`
 
-## 16. Output Akhir yang Saya Inginkan
+Kompilasi:
+- sentiment baseline metrics,
+- transformer metrics,
+- recommender metrics,
+- mode comparison report,
+- model registry.
 
-Saya ingin kamu menghasilkan:
+Output:
+- `reports/final_report.json`
 
-1. Arsitektur project
-2. Struktur folder
-3. Semua script Python modular
-4. Notebook EDA
-5. Pipeline preprocessing
-6. Training baseline sentiment model
-7. Training transformer sentiment model
-8. Training recommender system
-9. Evaluasi lengkap
-10. Penyimpanan model otomatis
-11. MLflow tracking
-12. Inference script
-13. README.md
-14. requirements.txt
-15. Penjelasan setiap langkah secara detail
+### 11.2 Model registry
 
----
+Modul: `src/utils.py::append_model_registry`
 
-## 17. Standar Kualitas
+Output:
+- `models/model_registry.json`
 
-Pastikan kode:
+## 12. Experiment Tracking
 
-* Clean
-* Modular
-* Reusable
-* Mudah dipahami
-* Menggunakan function dan class jika perlu
-* Memiliki komentar penting
-* Menghindari data leakage
-* Menyimpan semua output penting
-* Bisa dijalankan ulang
-* Cocok untuk dataset besar
-* Menggunakan random_state agar reproducible
+Modul: `src/mlflow_tracker.py`
 
-Gunakan:
+Sifat:
+- opsional,
+- aman ketika MLflow disabled atau tidak terinstall.
 
-random_state = 42
+Storage default:
+- `machine_learning/mlruns/`
 
----
+## 13. Konfigurasi Utama
 
-## 18. Catatan Penting
+File:
+- `machine_learning/config.yaml`
 
-Jangan langsung menggunakan model kompleks tanpa baseline.
+Kelompok konfigurasi:
+- `paths`
+- `data`
+- `preprocessing`
+- `sentiment`
+- `transformer`
+- `recommender`
+- `training`
+- `hadoop`
+- `spark`
+- `spark_preprocess`
 
-Urutan pengerjaan wajib:
+## 14. Kekuatan dan Batasan Implementasi
 
-1. EDA
-2. Preprocessing
-3. Baseline sentiment model
-4. Advanced sentiment model
-5. Recommender sederhana
-6. Recommender collaborative filtering
-7. Hybrid recommender
-8. Evaluation
-9. Model saving
-10. Documentation
+Kekuatan:
+1. Pipeline modular dan reproducible.
+2. Komparasi mode training terdokumentasi JSON.
+3. Memory fallback untuk data besar sudah diimplementasikan.
+4. Dashboard sudah bisa menjadi control panel operasional.
 
-Berikan penjelasan kenapa setiap langkah dilakukan, bukan hanya kode.
+Batasan:
+1. Training model belum distributed penuh di worker.
+2. Throughput `with_worker` dipengaruhi performa bridge HDFS dan jaringan.
+3. Perlu benchmark cluster stabil untuk angka eksperimen final.
 
-Jika ada dataset terlalu besar, berikan opsi sampling untuk eksperimen awal.
+## 15. Referensi Lanjutan
 
-Jika ada error karena memory atau GPU tidak tersedia, berikan alternatif training yang lebih ringan.
-
-Mulai dari membuat struktur project, lalu lanjutkan ke implementasi satu per satu.
-  
+Untuk pemetaan fungsi tiap file secara rinci lihat:
+- `documentation/structure.md`

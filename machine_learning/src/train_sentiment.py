@@ -31,6 +31,7 @@ from .mlflow_tracker import log_artifact, log_metrics, log_params, start_run
 from .utils import append_model_registry, ensure_dir, resolve_path
 
 LABEL_ORDER = [0, 1, 2]
+SENTIMENT_SPLIT_COLUMNS = ["review_text_processed", "sentiment_label"]
 
 
 def _resolve_dtype(dtype_name: str) -> np.dtype:
@@ -108,10 +109,28 @@ def _build_tfidf_profiles(config: Dict) -> list[Dict]:
     return profiles
 
 
+def _read_split_csv(path: Path) -> pd.DataFrame:
+    read_kwargs = {
+        "usecols": SENTIMENT_SPLIT_COLUMNS,
+        "dtype": {"sentiment_label": "int8"},
+        "low_memory": True,
+    }
+    try:
+        return pd.read_csv(path, **read_kwargs)
+    except pd.errors.ParserError as exc:
+        if "out of memory" not in str(exc).lower():
+            raise
+        logging.warning("Parser C kehabisan memori saat baca %s. Fallback ke engine='python'.", path)
+        return pd.read_csv(path, engine="python", **read_kwargs)
+    except MemoryError:
+        logging.warning("MemoryError saat baca %s. Fallback ke engine='python'.", path)
+        return pd.read_csv(path, engine="python", **read_kwargs)
+
+
 def _load_splits(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    train = pd.read_csv(resolve_path(config, "train_csv"))
-    val = pd.read_csv(resolve_path(config, "validation_csv"))
-    test = pd.read_csv(resolve_path(config, "test_csv"))
+    train = _read_split_csv(resolve_path(config, "train_csv"))
+    val = _read_split_csv(resolve_path(config, "validation_csv"))
+    test = _read_split_csv(resolve_path(config, "test_csv"))
     return train, val, test
 
 

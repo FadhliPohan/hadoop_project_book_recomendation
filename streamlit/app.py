@@ -1057,7 +1057,7 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
         e_cores = col2.number_input("executor-cores",  value=int(sp_cfg.get("executor_cores", 2)),  min_value=1, max_value=8)
         e_mem   = col3.text_input("executor-memory", value=sp_cfg.get("executor_memory", "2G"))
         d_mem   = col4.text_input("driver-memory",   value=sp_cfg.get("driver_memory", "2G"))
-        col5, col6 = st.columns(2)
+        col5, col6, col7 = st.columns(3)
         sample_fraction = col5.number_input(
             "sample-fraction",
             value=float(spp_cfg.get("sample_fraction", 1.0)),
@@ -1073,12 +1073,19 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
             max_value=1000,
             step=1,
         )
-        col7, col8 = st.columns(2)
-        log_row_counts = col7.checkbox(
+        max_rows = col7.number_input(
+            "max-rows (0 = full)",
+            value=int(spp_cfg.get("max_rows", 0)),
+            min_value=0,
+            max_value=100000000,
+            step=1000,
+        )
+        col8, col9 = st.columns(2)
+        log_row_counts = col8.checkbox(
             "log row counts",
             value=bool(spp_cfg.get("log_row_counts", False)),
         )
-        show_label_distribution = col8.checkbox(
+        show_label_distribution = col9.checkbox(
             "show label distribution",
             value=bool(spp_cfg.get("show_label_distribution", False)),
         )
@@ -1092,6 +1099,7 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
         st.caption(
             "Timeout ini hanya batas tunggu dashboard. Wrapper `spark_submit_training.sh` "
             "sekarang menjalankan preflight YARN dan warning hostname sebelum submit. "
+            "Gunakan `max-rows` untuk membatasi ukuran output Spark saat jaringan cluster lambat. "
             "Job ini tidak otomatis menyalin hasil ke folder `machine_learning/` di master."
         )
 
@@ -1106,6 +1114,7 @@ def tab_cluster(cfg: Dict, ccfg: Dict) -> None:
             f"YARN_PREFLIGHT_TIMEOUT={int(sp_cfg.get('preflight_timeout_sec', 20))}",
             f"SPARK_SAMPLE_FRACTION={float(sample_fraction):.4f}",
             f"SPARK_OUTPUT_PARTITIONS={int(output_partitions)}",
+            f"SPARK_MAX_ROWS={int(max_rows)}",
             f"SPARK_LOG_ROW_COUNTS={'1' if log_row_counts else '0'}",
             f"SPARK_SHOW_LABEL_DISTRIBUTION={'1' if show_label_distribution else '0'}",
             "bash", str(ROOT_DIR / "scripts" / "spark_submit_training.sh"),

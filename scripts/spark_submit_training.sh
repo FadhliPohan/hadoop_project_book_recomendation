@@ -127,6 +127,9 @@ echo "[INFO] num-executors    : $NUM_EXECUTORS"
 echo "[INFO] executor-cores   : $EXECUTOR_CORES"
 echo "[INFO] executor-memory  : $EXECUTOR_MEMORY"
 echo "[INFO] driver-memory    : $DRIVER_MEMORY"
+echo "[INFO] sample-fraction  : ${SPARK_SAMPLE_FRACTION:-1.0}"
+echo "[INFO] output-partitions: ${SPARK_OUTPUT_PARTITIONS:-0}"
+echo "[INFO] max-rows         : ${SPARK_MAX_ROWS:-0}"
 warn_loopback_hostname
 
 if [[ "$STEP" == "preprocess_spark" ]]; then

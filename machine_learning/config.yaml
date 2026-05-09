@@ -56,6 +56,7 @@ mlflow:
 
 training:
   master_ram_limit_gb: 3
+  ram_limit_safety_margin_mb: 512
   include_transformer_by_default: false
   auto_run_worker_preprocess: false
 
@@ -77,6 +78,7 @@ spark:
 
 spark_preprocess:
   sample_fraction: 1.0
+  max_rows: 120000
   log_row_counts: false
   show_label_distribution: false
   output_partitions: 0

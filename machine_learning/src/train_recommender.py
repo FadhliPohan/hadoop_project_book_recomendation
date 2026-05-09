@@ -265,6 +265,25 @@ def _diversity_at_k(
     return float(np.mean(diversities)) if diversities else 0.0
 
 
+def _load_processed_interactions(processed_path: Path) -> pd.DataFrame:
+    usecols = ["user_id", "item_id", "rating", "sentiment_label", "review_text_processed"]
+    read_kwargs = {
+        "usecols": usecols,
+        "dtype": {"rating": "float32", "sentiment_label": "int8"},
+        "low_memory": True,
+    }
+    try:
+        return pd.read_csv(processed_path, **read_kwargs)
+    except pd.errors.ParserError as exc:
+        if "out of memory" not in str(exc).lower():
+            raise
+        logging.warning("Parser C kehabisan memori saat baca %s. Fallback ke engine='python'.", processed_path)
+        return pd.read_csv(processed_path, engine="python", **read_kwargs)
+    except MemoryError:
+        logging.warning("MemoryError saat baca %s. Fallback ke engine='python'.", processed_path)
+        return pd.read_csv(processed_path, engine="python", **read_kwargs)
+
+
 def train_recommenders(config: Dict) -> Dict:
     processed_path = resolve_path(config, "processed_reviews_csv")
     rec_root = resolve_path(config, "recommender_dir")
@@ -280,8 +299,7 @@ def train_recommenders(config: Dict) -> Dict:
 
     run_ctx = start_run(config, "hybrid_recommender_v1") or nullcontext()
     with run_ctx:
-        df = pd.read_csv(processed_path)
-        interactions = df[["user_id", "item_id", "rating", "sentiment_label", "review_text_processed"]].copy()
+        interactions = _load_processed_interactions(processed_path).copy()
         interactions["user_id"] = interactions["user_id"].astype(str)
         interactions["item_id"] = interactions["item_id"].astype(str)
 

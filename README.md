@@ -74,6 +74,7 @@ Pipeline sekarang mendukung dua mode:
 - `with_worker`: preprocessing awal dilakukan distributed via Spark/Hadoop worker, lalu training tetap di master.
 
 Untuk menjaga fairness eksperimen, batas RAM proses training master default adalah **3GB** (bisa override dengan `--ram-limit-gb`).
+Jika limit terlalu ketat terhadap footprint proses saat ini, pipeline akan otomatis melewati limit dan memberi warning agar proses tidak crash (dikontrol oleh `training.ram_limit_safety_margin_mb`).
 
 Contoh training eksplisit:
 
@@ -97,6 +98,24 @@ python3 machine_learning/main.py --step train_pipeline --allow-training \
 # Jika ingin pipeline otomatis submit Spark preprocess dulu
 python3 machine_learning/main.py --step train_pipeline --allow-training \
   --training-mode with_worker --run-worker-preprocess --ram-limit-gb 3
+```
+
+## Optimasi Kecepatan `with_worker` (VirtualBox)
+
+Untuk koneksi antar VM yang terbatas, aktifkan output Spark yang lebih kecil agar bridge HDFS ke master jauh lebih cepat:
+
+- `machine_learning/config.yaml`:
+  - `spark_preprocess.max_rows: 120000`
+  - `spark_preprocess.sample_fraction: 1.0` (ubah < 1.0 jika ingin lebih kecil lagi)
+
+Catatan:
+- `max_rows=0` berarti simpan full output Spark ke HDFS.
+- Bridge HDFS sekarang memakai cache persisten di `/tmp/spark_hdfs_bridge_cache`, jadi run berikutnya bisa reuse tanpa download ulang file besar jika output HDFS belum berubah.
+
+Jika ingin reset cache bridge:
+
+```bash
+rm -rf /tmp/spark_hdfs_bridge_cache
 ```
 
 Menjalankan eksperimen komparasi dua mode sekaligus:

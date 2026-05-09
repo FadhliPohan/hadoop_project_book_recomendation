@@ -94,6 +94,25 @@ def _peak_memory_mb() -> float:
     return max_rss / 1024.0
 
 
+def _current_virtual_memory_bytes() -> Optional[int]:
+    status_path = Path("/proc/self/status")
+    if not status_path.exists():
+        return None
+
+    try:
+        for line in status_path.read_text(encoding="utf-8").splitlines():
+            if not line.startswith("VmSize:"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                return None
+            value_kb = int(parts[1])
+            return value_kb * 1024
+    except Exception:
+        return None
+    return None
+
+
 def apply_master_ram_limit(config: Dict[str, Any], ram_limit_gb: Optional[float] = None) -> Optional[float]:
     limit_gb = get_master_ram_limit_gb(config, ram_limit_gb=ram_limit_gb)
     if limit_gb <= 0:
@@ -107,6 +126,19 @@ def apply_master_ram_limit(config: Dict[str, Any], ram_limit_gb: Optional[float]
         return None
 
     limit_bytes = int(limit_gb * 1024 * 1024 * 1024)
+    safety_margin_mb = int(config.get("training", {}).get("ram_limit_safety_margin_mb", 512))
+    safety_margin_bytes = max(0, safety_margin_mb) * 1024 * 1024
+    current_vms = _current_virtual_memory_bytes()
+    if current_vms is not None and limit_bytes <= (current_vms + safety_margin_bytes):
+        logging.warning(
+            "Batas RAM master %.2f GB dilewati: VmSize proses saat ini %.2f GB + safety margin %.2f GB "
+            "sudah >= limit. Naikkan --ram-limit-gb jika ingin force limit.",
+            limit_gb,
+            current_vms / (1024.0 * 1024.0 * 1024.0),
+            safety_margin_bytes / (1024.0 * 1024.0 * 1024.0),
+        )
+        return None
+
     soft, hard = resource.getrlimit(resource.RLIMIT_AS)
     unlimited_values = {-1, resource.RLIM_INFINITY}
     hard_unlimited = hard in unlimited_values
@@ -142,6 +174,7 @@ def apply_master_ram_limit(config: Dict[str, Any], ram_limit_gb: Optional[float]
 def _run_worker_preprocess_submit(config: Dict[str, Any]) -> Dict[str, Any]:
     spark_cfg = config.get("spark", {})
     preprocess_cfg = config.get("spark_preprocess", {})
+    data_cfg = config.get("data", {})
     repo_root = project_root().parent
     submit_script = repo_root / "scripts" / "spark_submit_training.sh"
 
@@ -161,11 +194,23 @@ def _run_worker_preprocess_submit(config: Dict[str, Any]) -> Dict[str, Any]:
     env = os.environ.copy()
     env["SPARK_SAMPLE_FRACTION"] = str(float(preprocess_cfg.get("sample_fraction", 1.0)))
     env["SPARK_OUTPUT_PARTITIONS"] = str(int(preprocess_cfg.get("output_partitions", 0)))
+    max_rows_cfg = preprocess_cfg.get("max_rows", data_cfg.get("sample_rows", 0))
+    try:
+        max_rows = max(0, int(max_rows_cfg))
+    except (TypeError, ValueError):
+        max_rows = 0
+    env["SPARK_MAX_ROWS"] = str(max_rows)
     env["SPARK_LOG_ROW_COUNTS"] = "1" if bool(preprocess_cfg.get("log_row_counts", False)) else "0"
     env["SPARK_SHOW_LABEL_DISTRIBUTION"] = "1" if bool(
         preprocess_cfg.get("show_label_distribution", False)
     ) else "0"
     env["YARN_PREFLIGHT_TIMEOUT"] = str(int(spark_cfg.get("preflight_timeout_sec", 20)))
+
+    if max_rows > 0:
+        logging.info(
+            "Worker preprocess row cap aktif: max_rows=%s (ubah di config `spark_preprocess.max_rows`).",
+            max_rows,
+        )
 
     timeout_sec = int(spark_cfg.get("submit_timeout_sec", 1800))
     started_at = time.perf_counter()
@@ -387,12 +432,23 @@ def run_training_pipeline(
             lambda: _run_worker_preprocess_submit(config),
         )
 
-    applied_limit = apply_master_ram_limit(config, ram_limit_gb=ram_limit_gb)
-
-    _run_stage(
-        "preprocess",
-        lambda: preprocess_and_split(config, source=source),
-    )
+    applied_limit: Optional[float] = None
+    if source == "spark_hdfs":
+        logging.info(
+            "Mode spark_hdfs: menunda penerapan batas RAM master sampai stage preprocess selesai "
+            "agar bridge HDFS + pembacaan Parquet lebih stabil."
+        )
+        _run_stage(
+            "preprocess",
+            lambda: preprocess_and_split(config, source=source),
+        )
+        applied_limit = apply_master_ram_limit(config, ram_limit_gb=ram_limit_gb)
+    else:
+        applied_limit = apply_master_ram_limit(config, ram_limit_gb=ram_limit_gb)
+        _run_stage(
+            "preprocess",
+            lambda: preprocess_and_split(config, source=source),
+        )
     sentiment_metrics = _run_stage(
         "train_sentiment_baseline",
         lambda: train_baseline_sentiment(config),

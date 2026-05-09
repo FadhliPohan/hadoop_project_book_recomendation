@@ -27,6 +27,7 @@ DEFAULT_SAMPLE_FRACTION = 1.0
 DEFAULT_LOG_ROW_COUNTS = False
 DEFAULT_SHOW_LABEL_DISTRIBUTION = False
 DEFAULT_OUTPUT_PARTITIONS = 0
+DEFAULT_MAX_ROWS = 0
 
 
 def _build_hdfs_uri(namenode_uri: str, hdfs_path: str) -> str:
@@ -104,6 +105,13 @@ def _resolve_preprocess_options(cfg: dict) -> dict:
     if output_partitions < 0:
         output_partitions = DEFAULT_OUTPUT_PARTITIONS
 
+    max_rows = _coerce_int(
+        os.environ.get("SPARK_MAX_ROWS", spark_preprocess_cfg.get("max_rows")),
+        DEFAULT_MAX_ROWS,
+    )
+    if max_rows < 0:
+        max_rows = DEFAULT_MAX_ROWS
+
     return {
         "sample_fraction": sample_fraction,
         "log_row_counts": _coerce_bool(
@@ -115,6 +123,7 @@ def _resolve_preprocess_options(cfg: dict) -> dict:
             DEFAULT_SHOW_LABEL_DISTRIBUTION,
         ),
         "output_partitions": output_partitions,
+        "max_rows": max_rows,
     }
 
 
@@ -144,7 +153,8 @@ def main() -> None:
         f"sample_fraction={run_options['sample_fraction']}, "
         f"log_row_counts={run_options['log_row_counts']}, "
         f"show_label_distribution={run_options['show_label_distribution']}, "
-        f"output_partitions={run_options['output_partitions']}"
+        f"output_partitions={run_options['output_partitions']}, "
+        f"max_rows={run_options['max_rows']}"
     )
 
     print(f"[INFO] Membaca dataset dari HDFS: {hdfs_input}")
@@ -210,6 +220,10 @@ def main() -> None:
     if run_options["sample_fraction"] < 1.0:
         df = df.sample(fraction=run_options["sample_fraction"], seed=42)
         print(f"[INFO] Sampling aktif: {run_options['sample_fraction']:.3f}")
+
+    if run_options["max_rows"] > 0:
+        df = df.limit(int(run_options["max_rows"]))
+        print(f"[INFO] Row cap aktif: max_rows={run_options['max_rows']}")
 
     should_materialize = run_options["log_row_counts"] or run_options["show_label_distribution"]
     if should_materialize:
